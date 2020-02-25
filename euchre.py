@@ -135,10 +135,15 @@ def double_deck(handedness: int = 4) -> None:
 
     # set up teams and players
     if handedness == 3:
-        plist = [Player("One"), Player("Two"), Player("Third")]
+        plist = [Player("Juan"), Player("Sarah"), Player("Turia")]
         tea_lst = {Team({plist[0]}), Team({plist[1]}), Team({plist[2]})}
     else:
-        plist = [Player("North"), Player("East"), Player("South"), Player("West")]
+        plist = [
+            Player("Nelson"),
+            Player("Eustace"),
+            Player("Samantha"),
+            Player("Wyclef"),
+        ]
         tea_lst = {Team({plist[0], plist[2]}), Team({plist[1], plist[3]})}
     deal_order: Iterator[Player] = cycle(plist)
     next(deal_order)
@@ -161,7 +166,12 @@ def double_deck(handedness: int = 4) -> None:
     v: Tuple[int, Optional[Team]] = victory_check()
     while v[0] == 0:
         dealer: Player = next(deal_order)
-        bid_order: List[Player] = [next(deal_order), next(deal_order), next(deal_order), next(deal_order)]
+        bid_order: List[Player] = [
+            next(deal_order),
+            next(deal_order),
+            next(deal_order),
+            next(deal_order),
+        ]
         play_hand(deck, handedness, bid_order, tea_lst)
         v = victory_check()
 
@@ -170,7 +180,9 @@ def double_deck(handedness: int = 4) -> None:
         print(t.score)
 
 
-def play_hand(deck: List[Card], handedness: int, bid_order: List[Player], teams: Set[Team]) -> None:
+def play_hand(
+    deck: List[Card], handedness: int, bid_order: List[Player], teams: Set[Team]
+) -> None:
     random.shuffle(deck)
     hand_size: int = len(deck) // handedness  # could be hardcoded
     ppt: int = len(bid_order) // len(teams)
@@ -179,7 +191,7 @@ def play_hand(deck: List[Card], handedness: int, bid_order: List[Player], teams:
     # deal the cards
     idx: int = 0
     for player in bid_order:
-        player.hand = deck[idx: idx + hand_size]
+        player.hand = deck[idx : idx + hand_size]
     print(f"Dealer: {bid_order[-1]}")
 
     # bidding
