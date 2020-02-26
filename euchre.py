@@ -27,12 +27,12 @@ from typing import List, Optional, Tuple, Iterable, Iterator, Set
 
 
 class Suit(Enum):
-    JOKER = (0, "🃏")
-    CLUB = (1, "♣")
-    DIAMOND = (2, "♢")
-    SPADE = (3, "♠")
-    HEART = (4, "♡")
-    TRUMP = (5, "T")
+    JOKER = (0, "🃏", 0, "white")
+    CLUB = (1, "♣", 3, "black")
+    DIAMOND = (2, "♢", 4, "red")
+    SPADE = (3, "♠", 1, "black")
+    HEART = (4, "♡", 2, "red")
+    TRUMP = (5, "T", 5, "yes")
 
     def plural_name(self) -> str:
         if self != self.TRUMP:
@@ -196,6 +196,53 @@ def double_deck(handedness: int = 4) -> None:
         print(t.score)
 
 
+def bidding(
+    bid_order: List[Player], *, min_bid: int = 6, ls: bool = True
+) -> Tuple[List[Player], Optional[Suit], bool]:
+    first_round: bool = True
+    count: int = 1
+    hands: int = len(bid_order)
+    wp: Player
+    valid_bids: Set[int] = {6, 7, 8, 9, 10, 11, 12}
+    if ls:
+        valid_bids |= {18, 24}
+    wb: int = 0
+
+    for p in cycle(bid_order):
+        bid: int = random.randint(-4, 8)  # TODO
+        if bid not in valid_bids:
+            bid = random.randint(-5, 10)
+
+        # everyone has passed
+        if count == hands:
+            if first_round:  # stuck the dealer
+                wb = min_bid
+                print(f"Dealer {p} got stuck with {min_bid}")
+                wp = p
+            else:
+                wb = min_bid - 1
+                print(f"{wp} wins the bid with {wb}")
+            break
+
+        # player passes
+        if bid < min_bid:
+            print(f"{p} passes")
+            count += 1
+            continue
+
+        # bid successful
+        min_bid = bid + 1
+        wp = p
+        count = 1
+        first_round = False
+        print(f"{p} bids {bid}")
+    return None, None, None
+
+
+def play_trick(play_order: List[Player], trump: Optional[Suit], is_low: bool = False):
+    pass
+
+
 def play_hand(
     deck: List[Card], handedness: int, bid_order: List[Player], teams: Set[Team]
 ) -> None:
@@ -213,10 +260,11 @@ def play_hand(
         print(f"{player}: {player.hand}")
 
     # bidding
+    players, trump, is_low = bidding(bid_order)
 
     # play the tricks
     while hand_size > 0:
-        # play_trick(trump)  # TODO
+        play_trick(players, trump, is_low)
         hand_size -= 1
 
     # calculate scores
