@@ -60,7 +60,7 @@ class Rank(Enum):
     SEVEN = (7, "7")
     EIGHT = (8, "8")
     NINE = (9, "9")
-    TEN = (10, "🔟")
+    TEN = (10, "⒑")
     JACK = (11, "J")
     QUEEN = (12, "Q")
     KING = (13, "K")
@@ -120,20 +120,40 @@ class Player:
     hand: List[Card]  # sorted
     name: str
     tricks: int = 0
+    team: "Team"
+    player_type: int = 0
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, bot: int = 1):
         self.name = name
+        self.is_bot = bot
 
     def __str__(self):
         return f"{self.name}"
+
+    def choose_trump(self) -> Tuple[Optional[Suit], bool]:
+        if self.is_bot:
+            s = random.choice(
+                [Suit.HEART, Suit.SPADE, Suit.CLUB, Suit.DIAMOND, None, False]
+            )
+            r = False if s else random.choice([True, False])
+            return (None if not s else s), r
+
+    def make_bid(self, valid_bids: Set[int]) -> int:
+        if self.is_bot:
+            bid: int = random.randint(-4, 25)
+            if bid not in valid_bids:
+                bid = random.randint(-5, 10)
+            return bid
 
 
 class Team:
     players: Set[Player]
     score: int = 0
-    bid: int
+    bid: int = 0
 
     def __init__(self, players: Set[Player]):
+        for player in players:
+            player.team = self
         self.players = players
 
     def __str__(self):
@@ -186,7 +206,7 @@ def double_deck(handedness: int = 4) -> None:
     # play the game
     v: Tuple[int, Optional[Team]] = victory_check()
     while v[0] == 0:
-        dealer: Player = next(deal_order)
+        print(f"Dealer: {next(deal_order)}")
         bid_order: List[Player] = list(islice(deal_order, handedness))
         play_hand(deck, handedness, bid_order, tea_lst)
         v = victory_check()
@@ -197,21 +217,22 @@ def double_deck(handedness: int = 4) -> None:
 
 
 def bidding(
-    bid_order: List[Player], *, min_bid: int = 6, ls: bool = True
-) -> Tuple[List[Player], Optional[Suit], bool]:
+    bid_order: List[Player], *, min_bid: int = 6
+) -> List[Player]:
     first_round: bool = True
     count: int = 1
     hands: int = len(bid_order)
     wp: Player
     valid_bids: Set[int] = {6, 7, 8, 9, 10, 11, 12}
-    if ls:
+    if len(bid_order) == 4:
         valid_bids |= {18, 24}
+    else:
+        valid_bids |= {13, 14, 15, 16}
     wb: int = 0
+    bid_order = cycle(bid_order)
 
-    for p in cycle(bid_order):
-        bid: int = random.randint(-4, 8)  # TODO
-        if bid not in valid_bids:
-            bid = random.randint(-5, 10)
+    for p in bid_order:
+        bid: int = p.make_bid(valid_bids)
 
         # everyone has passed
         if count == hands:
@@ -219,9 +240,8 @@ def bidding(
                 wb = min_bid
                 print(f"Dealer {p} got stuck with {min_bid}")
                 wp = p
-            else:
+            else:  # someone won the bid
                 wb = min_bid - 1
-                print(f"{wp} wins the bid with {wb}")
             break
 
         # player passes
@@ -236,11 +256,16 @@ def bidding(
         count = 1
         first_round = False
         print(f"{p} bids {bid}")
-    return None, None, None
+
+    wp.team.bid = wb
+    return list(islice(bid_order, 3, 3 + hands))
 
 
-def play_trick(play_order: List[Player], trump: Optional[Suit], is_low: bool = False):
-    pass
+def play_trick(
+    play_order: List[Player], trump: Optional[Suit], is_low: bool = False
+) -> List[Player]:
+    random.choice(play_order).tricks += 1
+    return play_order
 
 
 def play_hand(
@@ -253,24 +278,54 @@ def play_hand(
 
     # deal the cards
     idx: int = 0
-    print(f"Dealer: {bid_order[-1]}")
     for player in bid_order:
         player.hand = deck[idx : idx + hand_size]
+        player.tricks = 0
         idx += hand_size
         print(f"{player}: {player.hand}")
 
     # bidding
-    players, trump, is_low = bidding(bid_order)
+    play_order: List[Player] = bidding(bid_order)
+    lead: Player = play_order[0]
+
+    # declare Trump
+    trump, is_low = lead.choose_trump()
+    t_d: str
+    if trump:
+        t_d = str(trump)
+    elif is_low:
+        t_d = "LoNo"
+    else:
+        t_d = "HiNo"
+    print(f"{lead} bid {lead.team.bid} {t_d}")
 
     # play the tricks
     while hand_size > 0:
-        play_trick(players, trump, is_low)
+        play_order = play_trick(play_order, trump, is_low)
         hand_size -= 1
 
     # calculate scores
     for t in teams:
-        t.score += random.randrange(-12, 14)
+        tr_t: int = 0
+        ls: int = 0
+        for p in t.players:
+            tr_t += p.tricks
+        if t.bid:
+            if t.bid > 16:  # only in 4 hand
+                ls = t.bid
+                t.bid = 12
+
+            if tr_t < t.bid:
+                print(f"{t} got Euchred and fell {t.bid-tr_t} short")
+                t.score -= t.bid
+            elif ls:
+                t.score += ls
+            else:
+                t.score += tr_t + 2
+        else:
+            t.score += tr_t
+        t.bid = 0  # reset for next time
 
 
 if __name__ == "__main__":
-    main()
+    main(4)
