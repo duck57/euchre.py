@@ -13,9 +13,9 @@ Notable differences (to match how I learned in high school calculus) include:
     * Minimum bid of 6 (which can be stuck to the dealer)
     * Shooters and loners are separate bids (guessing as ±18 for shooter, similar to a loner)
     * Shooters are a mandatory 2 card exchange with your partner
-    * Trump isn't announced until after bidding has conculded
+    * Trump isn't announced until after bidding has concluded
     * Winner of bid leads the first hand
-    * Winning your bid gives you (tricks eaned + 2) points
+    * Winning your bid gives you (tricks earned + 2) points
 
 Mothjab is a funny word with no current meaning.
 """
@@ -23,7 +23,7 @@ Mothjab is a funny word with no current meaning.
 from enum import Enum
 from itertools import cycle, islice
 import random
-from typing import List, Optional, Tuple, Iterable, Iterator, Set
+from typing import List, Optional, Tuple, Iterable, Iterator, Set, Callable
 
 
 class Suit(Enum):
@@ -47,6 +47,30 @@ class Suit(Enum):
 
     def value(self):
         return self._value_[0]
+
+    def color(self):
+        return self._value_[3]
+
+    def opposite(self) -> "Suit":
+        return op_s(self)
+
+    def __lt__(self, other):
+        return self.value() < other.value()
+
+    def __eq__(self, other):
+        return self.value() == other.value()
+
+
+def op_s(s: Suit) -> Suit:
+    if s == Suit.CLUB:
+        return Suit.SPADE
+    if s == Suit.SPADE:
+        return Suit.CLUB
+    if s == Suit.HEART:
+        return Suit.DIAMOND
+    if s == Suit.DIAMOND:
+        return Suit.HEART
+    return s
 
 
 class Rank(Enum):
@@ -84,6 +108,12 @@ class Rank(Enum):
     def __str__(self):
         return self.long_display_name()
 
+    def __lt__(self, other):
+        return self.value() < other.value()
+
+    def __eq__(self, other):
+        return self.value() == other.value()
+
 
 class Card:
     def __init__(self, rank, suit):
@@ -100,6 +130,25 @@ class Card:
 
     def __repr__(self):
         return f"{repr(self.d_rank)}{repr(self.d_suit)}"
+        # return f"{repr(self.rank)}{repr(self.suit)}"
+
+    def __eq__(self, other):
+        return True if (self.rank == other.rank and self.suit == other.suit) else False
+
+    def __lt__(self, other):
+        if self.suit < other.suit:
+            return True
+        if self.suit > other.suit:
+            return False
+        if self.rank < other.rank:
+            return True
+        return False
+
+
+def display_key(c: Card) -> int:
+    if c.rank == Rank.LEFT_BOWER:
+        return c.d_suit.opposite().value() * 100 + 15
+    return c.d_suit.value() * 100 + c.rank.value()
 
 
 # make a euchre deck
@@ -145,6 +194,38 @@ class Player:
                 bid = random.randint(-5, 10)
             return bid
 
+    def trumpify_hand(self, trump_suit: Optional[Suit], is_lo: bool = False):
+        """Marks the trump suit and sort the hands"""
+        if trump_suit:
+            make_cards_trump(self.hand, trump_suit)
+        self.hand.sort(reverse=is_lo, key=self.choose_sort_key(trump_suit))
+
+    def choose_sort_key(self, trump: Optional[Suit]) -> Callable:
+        if not self.is_bot:
+            return display_key
+        if not trump:
+            return rank_first_key
+        return suit_first_key
+
+
+def rank_first_key(c: Card) -> int:
+    return c.rank.value() * 10 + c.suit.value()
+
+
+def suit_first_key(c: Card) -> int:
+    return c.suit.value() * 100 + c.rank.value()
+
+
+def make_cards_trump(h: List[Card], trump_suit: Suit):
+    for card in h:
+        if card.suit == trump_suit:
+            card.suit = Suit.TRUMP
+            if card.rank == Rank.JACK:
+                card.rank = Rank.RIGHT_BOWER
+        if card.rank == Rank.JACK and card.suit == trump_suit.opposite():
+            card.suit = Suit.TRUMP
+            card.rank = Rank.LEFT_BOWER
+
 
 class Team:
     players: Set[Player]
@@ -160,14 +241,31 @@ class Team:
         return str(self.players)
 
 
+class Game:
+    teams: Set[Team]
+    play_order: List[Player]
+    trump: Optional[Suit] = None
+    low_win: bool = False
+    discard_pile: List[Card] = []
+    unplayed_cards: List[Card] = []
+
+    def __init__(self, players: List[Player]):
+        self.play_order = players
+        for p in players:
+            self.teams.add(p.team)
+        self.unplayed_cards = make_pinochle_deck()
+
+
 # main method
 def main(handedness: int = 4):
+    # x = make_pinochle_deck()
+    # make_cards_trump(x, Suit.SPADE)
+    # print(sorted(x, key=display_key))
     double_deck(handedness)
 
 
 # normal euchre would be an entirely different function
 def double_deck(handedness: int = 4) -> None:
-    deck: List[Card] = make_pinochle_deck()
     plist: List[Player]
     tea_lst: Set[Team]
     victory_threshold: int = 50
@@ -208,7 +306,7 @@ def double_deck(handedness: int = 4) -> None:
     while v[0] == 0:
         print(f"Dealer: {next(deal_order)}")
         bid_order: List[Player] = list(islice(deal_order, handedness))
-        play_hand(deck, handedness, bid_order, tea_lst)
+        play_hand(make_pinochle_deck(), handedness, bid_order, tea_lst)
         v = victory_check()
 
     # display final scores
@@ -282,7 +380,6 @@ def play_hand(
         player.hand = deck[idx : idx + hand_size]
         player.tricks = 0
         idx += hand_size
-        print(f"{player}: {player.hand}")
 
     # bidding
     play_order: List[Player] = bidding(bid_order)
@@ -298,6 +395,11 @@ def play_hand(
     else:
         t_d = "HiNo"
     print(f"{lead} bid {lead.team.bid} {t_d}")
+
+    # modify hands if trump called
+    for player in play_order:
+        player.trumpify_hand(trump, is_low)
+        print(f"{player}: {player.hand}")
 
     # play the tricks
     while hand_size > 0:
