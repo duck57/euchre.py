@@ -360,6 +360,7 @@ class Game:
                 cards, self.handedness, is_low, self.discard_pile, self.unplayed_cards
             )
             cards.append(c)
+            print(f"{p.name} played {repr(c)}")
             p = p.next_player
 
         # find the winner
@@ -371,6 +372,8 @@ class Game:
                 wc = c
                 w = i
             i += 1
+        po[w].tricks += 1
+        print(f"{po[w].name} won the trick")
         return po[w]
 
 
