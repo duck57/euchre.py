@@ -27,54 +27,61 @@ from typing import List, Optional, Tuple, Iterable, Iterator, Set, Callable, Dic
 from copy import deepcopy
 
 
-class Suit(Enum):
-    JOKER = (0, "🃏", 0, "white")
-    CLUB = (1, "♣", 3, "black")
-    DIAMOND = (2, "♢", 4, "red")
-    SPADE = (3, "♠", 1, "black")
-    HEART = (4, "♡", 2, "red")
-    TRUMP = (5, "T", 5, "yes")
+class Color:
+    WHITE = (0, "FFF")
+    BLACK = (1, "000")
+    RED = (2, "F00")
+    YES = (99, "")
 
+    def __init__(self, value: int, hexa: str):
+        self.v = value
+        self.hex = hexa
+
+    def __hash__(self) -> int:
+        return self.v
+
+
+class Suit(Enum):
+    JOKER = (0, "🃏", "JOKER", Color.WHITE)
+    CLUB = (1, "♣", "SPADE", Color.BLACK)
+    DIAMOND = (2, "♢", "HEART", Color.RED)
+    SPADE = (3, "♠", "CLUB", Color.BLACK)
+    HEART = (4, "♡", "DIAMOND", Color.RED)
+    TRUMP = (5, "T", "TRUMP", Color.YES)
+
+    opposite: "Suit"
+    v: int
+
+    def __init__(self, value: int, symbol: str, opposite: str, color: Color):
+        self.v = value
+        self.symbol = symbol
+        self.color = color
+        try:
+            self.opposite = self._member_map_[opposite]
+            self._member_map_[opposite].opposite = self
+        except KeyError:
+            pass
+
+    @property
     def plural_name(self) -> str:
         if self != self.TRUMP:
             return self.name + "S"
         return self.name
 
     def __str__(self):
-        return self.plural_name()
+        return self.plural_name
 
     def __repr__(self):
-        return self._value_[1]
-
-    def value(self):
-        return self._value_[0]
-
-    def color(self):
-        return self._value_[3]
-
-    def opposite(self) -> "Suit":
-        return op_s(self)
+        return self.symbol
 
     def __lt__(self, other):
-        return self.value() < other.value()
+        return self.v < other.v
 
     def __eq__(self, other):
-        return self.value() == other.value()
+        return self.v == other.v
 
-    def __hash__(self):
-        return self.value()
-
-
-def op_s(s: Suit) -> Suit:
-    if s == Suit.CLUB:
-        return Suit.SPADE
-    if s == Suit.SPADE:
-        return Suit.CLUB
-    if s == Suit.HEART:
-        return Suit.DIAMOND
-    if s == Suit.DIAMOND:
-        return Suit.HEART
-    return s
+    def __hash__(self) -> int:
+        return self.v
 
 
 class Rank(Enum):
@@ -96,6 +103,10 @@ class Rank(Enum):
     LEFT_BOWER = (15, "L")
     RIGHT_BOWER = (16, "R")
 
+    def __init__(self, value: int, chr: str):
+        self.v = value
+        self.char = chr
+
     def long_display_name(self) -> str:
         if self == self.ACE_HI:
             return "ACE"
@@ -103,23 +114,20 @@ class Rank(Enum):
             return "ACE"
         return self.name
 
-    def value(self):
-        return self._value_[0]
-
     def __repr__(self):
-        return self._value_[1]
+        return self.char
 
     def __str__(self):
         return self.long_display_name()
 
     def __lt__(self, other):
-        return self.value() < other.value()
+        return self.v < other.v
 
     def __eq__(self, other):
-        return self.value() == other.value()
+        return self.v == other.v
 
     def __hash__(self):
-        return self.value()
+        return self.v
 
 
 class Card:
@@ -129,11 +137,12 @@ class Card:
         self.d_rank = rank
         self.d_suit = suit
 
+    @property
     def card_name(self) -> str:
         return self.rank.long_display_name() + " of " + self.suit.plural_name()
 
     def __str__(self) -> str:
-        return self.card_name()
+        return self.card_name
 
     def __repr__(self):
         return f"{repr(self.d_rank)}{repr(self.d_suit)}"
@@ -277,26 +286,36 @@ class Player:
     ) -> Card:
         valid_cards: List[Card] = []
         c: Card
+
+        # Follow suit
         if trick_in_progress:
             valid_cards = follow_suit(trick_in_progress[0].suit, self.hand, strict=True)
         if not valid_cards:
             valid_cards = self.hand
+
+        # pick the card
         if not self.is_bot:
             pass  # replace with pick_card_human
         if self.is_bot == 1:
             c = valid_cards[-1]  # simple AI algorithm
         if self.is_bot == 2:
             pass
+
+        # play the card
         self.hand.remove(c)
         return c  # use discard_pile and unplayed
 
+    @property
+    def teammates(self) -> "Set[Player]":
+        return self.team.players - {self}
+
 
 def rank_first_key(c: Card) -> int:
-    return c.rank.value() * 10 + c.suit.value()
+    return c.rank.v * 10 + c.suit.v
 
 
 def suit_first_key(c: Card) -> int:
-    return c.suit.value() * 100 + c.rank.value()
+    return c.suit.v * 100 + c.rank.v
 
 
 def power_trump_key(c: Card) -> int:
@@ -309,7 +328,7 @@ def make_cards_trump(h: List[Card], trump_suit: Suit):
             card.suit = Suit.TRUMP
             if card.rank == Rank.JACK:
                 card.rank = Rank.RIGHT_BOWER
-        if card.rank == Rank.JACK and card.suit == trump_suit.opposite():
+        if card.rank == Rank.JACK and card.suit == trump_suit.opposite:
             card.suit = Suit.TRUMP
             card.rank = Rank.LEFT_BOWER
 
