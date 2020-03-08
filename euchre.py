@@ -144,6 +144,12 @@ class Card:
             return True
         return False
 
+    def beats(self, other: "Card", is_low: bool) -> bool:
+        """Assumes the first played card of equal value wins"""
+        if other.suit != self.suit and other.suit != Suit.TRUMP:
+            return False  # must follow suit
+        return (self < other) if is_low else (self > other)
+
 
 def display_key(c: Card) -> int:
     if c.rank == Rank.LEFT_BOWER:
@@ -171,6 +177,8 @@ class Player:
     tricks: int = 0
     team: "Team"
     player_type: int = 0
+    next_player: "Player"
+    is_bot: int
 
     def __init__(self, name: str, bot: int = 1):
         self.name = name
@@ -207,6 +215,20 @@ class Player:
             return rank_first_key
         return suit_first_key
 
+    def play_card(
+        self,
+        trick_in_progress: List[Card],
+        handedness: int,
+        is_low: bool,
+        discard_pile: Optional[List[Card]],
+        unplayed: Optional[List[Card]],
+    ) -> Card:
+        if not self.is_bot:
+            return self.hand.pop()  # replace with pick_card_human
+        if self.is_bot == 1:
+            return self.hand.pop()  # simple AI algorithm
+        return self.hand.pop()  # use discard_pile and unplayed
+
 
 def rank_first_key(c: Card) -> int:
     return c.rank.value() * 10 + c.suit.value()
@@ -242,25 +264,125 @@ class Team:
 
 
 class Game:
-    teams: Set[Team]
-    play_order: List[Player]
+    teams: Set[Team] = set()
     trump: Optional[Suit] = None
     low_win: bool = False
     discard_pile: List[Card] = []
     unplayed_cards: List[Card] = []
+    deck_generator: Callable
+    handedness: int
+    hand_size: int
+    current_dealer: Player
 
-    def __init__(self, players: List[Player]):
-        self.play_order = players
+    def __init__(self, players: List[Player], deck_gen: Callable):
         for p in players:
             self.teams.add(p.team)
-        self.unplayed_cards = make_pinochle_deck()
+        self.deck_generator = deck_gen
+        self.current_dealer = players[2]  # initial dealer for 4-hands should be South
+        self.handedness = len(players)
+        self.hand_size = 48 // self.handedness  # adjust this for single-deck
+        for i in range(self.handedness - 1):
+            players[i].next_player = players[i + 1]
+        players[self.handedness - 1].next_player = players[0]
+
+    def play_hand(self) -> None:
+        deck: List[Card] = self.deck_generator()
+        random.shuffle(deck)
+        print(f"Dealer: {self.current_dealer}")
+        po: List[Player] = get_play_order(self.current_dealer, self.handedness)
+        po.append(self.current_dealer)
+        po.pop(0)  # because the dealer doesn't lead bidding
+
+        # deal the cards
+        idx: int = 0
+        for player in po:
+            player.hand = deck[idx : idx + self.hand_size]
+            player.tricks = 0
+            idx += self.hand_size
+
+        # bidding
+        lead: Player = bidding(po)
+
+        # declare Trump
+        trump, is_low = lead.choose_trump()
+        t_d: str
+        if trump:
+            t_d = str(trump)
+        elif is_low:
+            t_d = "LoNo"
+        else:
+            t_d = "HiNo"
+        print(f"{lead} bid {lead.team.bid} {t_d}")
+
+        # modify hands if trump called
+        for player in po:
+            player.trumpify_hand(trump, is_low)
+            print(f"{player}: {follow_suit(trump, player.hand, False)}")
+
+        # play the tricks
+        hand_size: int = self.hand_size
+        while hand_size > 0:
+            lead = self.play_trick(lead, is_low)
+            hand_size -= 1
+
+        # calculate scores
+        for t in self.teams:
+            tr_t: int = 0
+            ls: int = 0
+            for p in t.players:
+                tr_t += p.tricks
+            if t.bid:
+                if t.bid > 16:  # only in 4 hand
+                    ls = t.bid
+                    t.bid = 12
+
+                if tr_t < t.bid:
+                    print(f"{t} got Euchred and fell {t.bid - tr_t} short")
+                    t.score -= t.bid
+                elif ls:
+                    t.score += ls
+                else:
+                    t.score += tr_t + 2
+            else:
+                t.score += tr_t
+            t.bid = 0  # reset for next time
+        self.current_dealer = self.current_dealer.next_player
+
+    def play_trick(self, lead: Player, is_low: bool = False) -> Player:
+        p: Player = lead
+        po: List[Player] = []
+        cards: List[Card] = []
+
+        # play the cards
+        while p not in po:
+            po.append(p)
+            c: Card = p.play_card(
+                cards, self.handedness, is_low, self.discard_pile, self.unplayed_cards
+            )
+            cards.append(c)
+            p = p.next_player
+
+        # find the winner
+        i: int = 0
+        w: int = 0
+        wc: Card = cards[0]
+        for c in cards:
+            if c.beats(wc, is_low):
+                wc = c
+                w = i
+            i += 1
+        return po[w]
+
+
+def get_play_order(lead: Player, handedness: int) -> List[Player]:
+    po: List[Player] = [lead]
+    for i in range(handedness - 1):
+        po.append(po[-1].next_player)
+    return po
 
 
 # main method
 def main(handedness: int = 4):
-    # x = make_pinochle_deck()
-    # make_cards_trump(x, Suit.SPADE)
-    # print(sorted(x, key=display_key))
     double_deck(handedness)
 
 
@@ -284,9 +406,7 @@ def double_deck(handedness: int = 4) -> None:
             Player("Wyclef"),
         ]
         tea_lst = {Team({plist[0], plist[2]}), Team({plist[1], plist[3]})}
-    deal_order: Iterator[Player] = cycle(plist)
-    next(deal_order)
-    next(deal_order)  # initial dealer for 4-hands should be South
+    g: Game = Game(plist, make_pinochle_deck)
 
     def victory_check() -> Tuple[int, Optional[Team]]:
         scores_all_bad: bool = True
@@ -304,9 +424,7 @@ def double_deck(handedness: int = 4) -> None:
     # play the game
     v: Tuple[int, Optional[Team]] = victory_check()
     while v[0] == 0:
-        print(f"Dealer: {next(deal_order)}")
-        bid_order: List[Player] = list(islice(deal_order, handedness))
-        play_hand(make_pinochle_deck(), handedness, bid_order, tea_lst)
+        g.play_hand()
         v = victory_check()
 
     # display final scores
@@ -314,9 +432,7 @@ def double_deck(handedness: int = 4) -> None:
         print(t.score)
 
 
-def bidding(
-    bid_order: List[Player], *, min_bid: int = 6
-) -> List[Player]:
+def bidding(bid_order: List[Player], *, min_bid: int = 6) -> Player:
     first_round: bool = True
     count: int = 1
     hands: int = len(bid_order)
@@ -356,77 +472,13 @@ def bidding(
         print(f"{p} bids {bid}")
 
     wp.team.bid = wb
-    return list(islice(bid_order, 3, 3 + hands))
+    return wp
 
 
-def play_trick(
-    play_order: List[Player], trump: Optional[Suit], is_low: bool = False
-) -> List[Player]:
-    random.choice(play_order).tricks += 1
-    return play_order
-
-
-def play_hand(
-    deck: List[Card], handedness: int, bid_order: List[Player], teams: Set[Team]
-) -> None:
-    random.shuffle(deck)
-    hand_size: int = len(deck) // handedness  # could be hardcoded
-    ppt: int = len(bid_order) // len(teams)
-    bid_cycle: Iterator[Player] = cycle(bid_order)
-
-    # deal the cards
-    idx: int = 0
-    for player in bid_order:
-        player.hand = deck[idx : idx + hand_size]
-        player.tricks = 0
-        idx += hand_size
-
-    # bidding
-    play_order: List[Player] = bidding(bid_order)
-    lead: Player = play_order[0]
-
-    # declare Trump
-    trump, is_low = lead.choose_trump()
-    t_d: str
-    if trump:
-        t_d = str(trump)
-    elif is_low:
-        t_d = "LoNo"
-    else:
-        t_d = "HiNo"
-    print(f"{lead} bid {lead.team.bid} {t_d}")
-
-    # modify hands if trump called
-    for player in play_order:
-        player.trumpify_hand(trump, is_low)
-        print(f"{player}: {player.hand}")
-
-    # play the tricks
-    while hand_size > 0:
-        play_order = play_trick(play_order, trump, is_low)
-        hand_size -= 1
-
-    # calculate scores
-    for t in teams:
-        tr_t: int = 0
-        ls: int = 0
-        for p in t.players:
-            tr_t += p.tricks
-        if t.bid:
-            if t.bid > 16:  # only in 4 hand
-                ls = t.bid
-                t.bid = 12
-
-            if tr_t < t.bid:
-                print(f"{t} got Euchred and fell {t.bid-tr_t} short")
-                t.score -= t.bid
-            elif ls:
-                t.score += ls
-            else:
-                t.score += tr_t + 2
-        else:
-            t.score += tr_t
-        t.bid = 0  # reset for next time
+def follow_suit(s: Optional[Suit], cs: List[Card], strict: bool = True):
+    if not s:
+        return cs
+    return [c for c in cs if (c.suit == s or c.suit == Suit.TRUMP and not strict)]
 
 
 if __name__ == "__main__":
