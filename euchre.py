@@ -23,7 +23,8 @@ Mothjab is a funny word with no current meaning.
 from enum import Enum
 from itertools import cycle, islice
 import random
-from typing import List, Optional, Tuple, Iterable, Iterator, Set, Callable
+from typing import List, Optional, Tuple, Iterable, Iterator, Set, Callable, Dict
+from copy import deepcopy
 
 
 class Suit(Enum):
@@ -59,6 +60,9 @@ class Suit(Enum):
 
     def __eq__(self, other):
         return self.value() == other.value()
+
+    def __hash__(self):
+        return self.value()
 
 
 def op_s(s: Suit) -> Suit:
@@ -113,6 +117,9 @@ class Rank(Enum):
 
     def __eq__(self, other):
         return self.value() == other.value()
+
+    def __hash__(self):
+        return self.value()
 
 
 class Card:
@@ -179,6 +186,7 @@ class Player:
     player_type: int = 0
     next_player: "Player"
     is_bot: int
+    desired_trump: Tuple[Optional[Suit], bool]
 
     def __init__(self, name: str, bot: int = 1):
         self.name = name
@@ -187,20 +195,66 @@ class Player:
     def __str__(self):
         return f"{self.name}"
 
+    def __repr__(self):
+        return f"Player {self.name}"
+
     def choose_trump(self) -> Tuple[Optional[Suit], bool]:
         if self.is_bot:
-            s = random.choice(
-                [Suit.HEART, Suit.SPADE, Suit.CLUB, Suit.DIAMOND, None, False]
-            )
-            r = False if s else random.choice([True, False])
-            return (None if not s else s), r
+            return self.desired_trump
 
-    def make_bid(self, valid_bids: Set[int]) -> int:
+    def make_bid(self, valid_bids: Set[int], d: List[Card], handedness: int) -> int:
+        bid: int = 0
         if self.is_bot:
-            bid: int = random.randint(-4, 25)
-            if bid not in valid_bids:
-                bid = random.randint(-5, 10)
-            return bid
+            # setup
+            test_bids: Dict[Tuple[Optional[Suit], bool], int] = {
+                (Suit.SPADE, False): 0,
+                (Suit.HEART, False): 0,
+                (Suit.DIAMOND, False): 0,
+                (Suit.CLUB, False): 0,
+                (None, False): 0,  # HiNo
+                (None, True): 0,  # LoNo
+            }
+            for card in self.hand:
+                d.remove(card)
+
+            # test the bids by simulating games
+            for t in test_bids.keys():
+                # internal setup
+                h_p: List[Card] = deepcopy(self.hand)
+                d_p: List[Card] = deepcopy(d)
+                if t[0]:
+                    make_cards_trump(h_p, t[0])
+                    make_cards_trump(d_p, t[0])
+                # largest cards first this time
+                h_p.sort(key=power_trump_key, reverse=not t[1])
+                d_p.sort(key=power_trump_key, reverse=not t[1])
+                my_trump: List[Card] = follow_suit(Suit.TRUMP, h_p)
+                my_other: List[Card] = [c for c in h_p if (c.suit != Suit.TRUMP)]
+                mystery_trump: List[Card] = follow_suit(Suit.TRUMP, d_p)
+                mystery_other: List[Card] = [c for c in d_p if (c.suit != Suit.TRUMP)]
+
+                # simulate a game
+                for card in h_p:
+                    upset_check: List[Card] = follow_suit(
+                        card.suit, d_p, False
+                    )[:handedness-1]
+                    if not upset_check:
+                        continue
+                    if card.beats(upset_check[-1], t[1]):
+                        test_bids[t] += 1
+                    for c in upset_check:
+                        d_p.remove(c)
+                print(f"{t}: {test_bids[t]}")
+
+            # pick the biggest
+            bid = max(test_bids.values())
+            self.desired_trump = random.choice(
+                [k for k in test_bids.keys() if (test_bids[k] == bid)]
+            )
+            bid += 2 if handedness == 4 else 0  # count on two tricks from your partner
+            if bid > len(self.hand):
+                bid = max(valid_bids)  # call a loner
+        return bid if bid in valid_bids else 0
 
     def trumpify_hand(self, trump_suit: Optional[Suit], is_lo: bool = False):
         """Marks the trump suit and sort the hands"""
@@ -211,9 +265,7 @@ class Player:
     def choose_sort_key(self, trump: Optional[Suit]) -> Callable:
         if not self.is_bot:
             return display_key
-        if not trump:
-            return rank_first_key
-        return suit_first_key
+        return power_trump_key
 
     def play_card(
         self,
@@ -223,11 +275,20 @@ class Player:
         discard_pile: Optional[List[Card]],
         unplayed: Optional[List[Card]],
     ) -> Card:
+        valid_cards: List[Card] = []
+        c: Card
+        if trick_in_progress:
+            valid_cards = follow_suit(trick_in_progress[0].suit, self.hand, strict=True)
+        if not valid_cards:
+            valid_cards = self.hand
         if not self.is_bot:
-            return self.hand.pop()  # replace with pick_card_human
+            pass  # replace with pick_card_human
         if self.is_bot == 1:
-            return self.hand.pop()  # simple AI algorithm
-        return self.hand.pop()  # use discard_pile and unplayed
+            c = valid_cards[-1]  # simple AI algorithm
+        if self.is_bot == 2:
+            pass
+        self.hand.remove(c)
+        return c  # use discard_pile and unplayed
 
 
 def rank_first_key(c: Card) -> int:
@@ -236,6 +297,10 @@ def rank_first_key(c: Card) -> int:
 
 def suit_first_key(c: Card) -> int:
     return c.suit.value() * 100 + c.rank.value()
+
+
+def power_trump_key(c: Card) -> int:
+    return rank_first_key(c) + (1000 if c.suit == Suit.TRUMP else 0)
 
 
 def make_cards_trump(h: List[Card], trump_suit: Suit):
@@ -259,7 +324,7 @@ class Team:
             player.team = self
         self.players = players
 
-    def __str__(self):
+    def __repr__(self):
         return str(self.players)
 
 
@@ -317,7 +382,7 @@ class Game:
         # modify hands if trump called
         for player in po:
             player.trumpify_hand(trump, is_low)
-            print(f"{player}: {follow_suit(trump, player.hand, False)}")
+            print(f"{player}: {player.hand}")
 
         # play the tricks
         hand_size: int = self.hand_size
@@ -337,14 +402,17 @@ class Game:
                     t.bid = 12
 
                 if tr_t < t.bid:
-                    print(f"{t} got Euchred and fell {t.bid - tr_t} short")
+                    print(f"{t} got Euchred and fell {t.bid - tr_t} short of {t.bid}")
                     t.score -= t.bid
                 elif ls:
+                    print(f"{t} won the loner, the absolute madman!")
                     t.score += ls
                 else:
+                    print(f"{t} beat their bid of {t.bid} with {tr_t} tricks")
                     t.score += tr_t + 2
             else:
                 t.score += tr_t
+            print(t.score)
             t.bid = 0  # reset for next time
         self.current_dealer = self.current_dealer.next_player
 
@@ -360,7 +428,7 @@ class Game:
                 cards, self.handedness, is_low, self.discard_pile, self.unplayed_cards
             )
             cards.append(c)
-            print(f"{p.name} played {repr(c)}")
+            # print(f"{p.name} played {repr(c)}")
             p = p.next_player
 
         # find the winner
@@ -373,7 +441,7 @@ class Game:
                 w = i
             i += 1
         po[w].tricks += 1
-        print(f"{po[w].name} won the trick")
+        # print(f"{po[w].name} won the trick")
         return po[w]
 
 
@@ -449,7 +517,7 @@ def bidding(bid_order: List[Player], *, min_bid: int = 6) -> Player:
     bid_order = cycle(bid_order)
 
     for p in bid_order:
-        bid: int = p.make_bid(valid_bids)
+        bid: int = p.make_bid(valid_bids, make_pinochle_deck(), hands)
 
         # everyone has passed
         if count == hands:
@@ -478,7 +546,7 @@ def bidding(bid_order: List[Player], *, min_bid: int = 6) -> Player:
     return wp
 
 
-def follow_suit(s: Optional[Suit], cs: List[Card], strict: bool = True):
+def follow_suit(s: Optional[Suit], cs: List[Card], strict: bool = True) -> List[Card]:
     if not s:
         return cs
     return [c for c in cs if (c.suit == s or c.suit == Suit.TRUMP and not strict)]
