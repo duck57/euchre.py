@@ -25,6 +25,7 @@ from itertools import cycle, islice
 import random
 from typing import List, Optional, Tuple, Iterable, Iterator, Set, Callable, Dict
 from copy import deepcopy
+from datetime import datetime
 
 
 class Color:
@@ -244,9 +245,9 @@ class Player:
 
                 # simulate a game
                 for card in h_p:
-                    upset_check: List[Card] = follow_suit(
-                        card.suit, d_p, False
-                    )[:handedness-1]
+                    upset_check: List[Card] = follow_suit(card.suit, d_p, False)[
+                        : handedness - 1
+                    ]
                     if not upset_check:
                         continue
                     if card.beats(upset_check[-1], t[1]):
@@ -334,17 +335,26 @@ def make_cards_trump(h: List[Card], trump_suit: Suit):
 
 
 class Team:
-    players: Set[Player]
-    score: int = 0
     bid: int = 0
 
     def __init__(self, players: Set[Player]):
         for player in players:
             player.team = self
-        self.players = players
+        self.players: Set[Player] = players
+        self.bid_history: List[str] = []
+        self.tricks_taken: List[int] = []
+        self.score_changes: List[int] = []
 
     def __repr__(self):
         return str(self.players)
+
+    @property
+    def score(self):
+        return sum(self.score_changes)
+
+    @score.setter
+    def score(self, value: int):
+        self.score_changes.append(value)
 
 
 class Game:
@@ -413,25 +423,31 @@ class Game:
         for t in self.teams:
             tr_t: int = 0
             ls: int = 0
+            bid: int = t.bid
             for p in t.players:
                 tr_t += p.tricks
-            if t.bid:
-                if t.bid > 16:  # only in 4 hand
-                    ls = t.bid
-                    t.bid = 12
+            if bid:
+                # loners and shooters
+                if bid > self.hand_size:
+                    ls = bid
+                    bid = self.hand_size
 
-                if tr_t < t.bid:
-                    print(f"{t} got Euchred and fell {t.bid - tr_t} short of {t.bid}")
-                    t.score -= t.bid
+                if tr_t < bid:
+                    print(f"{t} got Euchred and fell {bid - tr_t} short of {bid}")
+                    t.score = -bid
                 elif ls:
-                    print(f"{t} won the loner, the absolute madman!")
-                    t.score += ls
+                    print(f"Someone on {t} won the loner, the absolute madman!")
+                    t.score = ls
                 else:
-                    print(f"{t} beat their bid of {t.bid} with {tr_t} tricks")
-                    t.score += tr_t + 2
-            else:
-                t.score += tr_t
-            print(t.score)
+                    print(f"{t} beat their bid of {bid} with {tr_t} tricks")
+                    t.score = tr_t + 2
+            else:  # tricks the non-bidding team earned
+                t.score = tr_t
+
+            # bookkeeping
+            t.bid_history.append(f"{ls if ls else bid} {t_d}" if bid else str(None))
+            t.tricks_taken.append(tr_t)
+            print(f"{t}: {t.score}")
             t.bid = 0  # reset for next time
         self.current_dealer = self.current_dealer.next_player
 
@@ -463,6 +479,44 @@ class Game:
         # print(f"{po[w].name} won the trick")
         return po[w]
 
+    def write_log(self, splitter: str = "\t|\t"):
+        f = open(f"{str(datetime.now()).split('.')[0]}.gamelog", "w")
+        t_l: List[Team] = list(self.teams)  # give a consistent ordering
+
+        # headers
+        f.write(splitter)
+        f.write(splitter.join([f"{t}\t\t" for t in t_l]))
+        f.write(f"\n{splitter}")
+        f.write(splitter.join(["Bid\tTricks Taken\tScore Change" for _ in t_l]))
+        f.write(f"\nHand{splitter}")
+        f.write(splitter.join(["===\t===\t===" for _ in t_l]))
+
+        # body
+        for hand in range(len(t_l[0].bid_history)):
+            f.write(f"\n{hand+1}{splitter}")
+            f.write(
+                splitter.join(
+                    [
+                        f"{t.bid_history[hand]}\t{t.tricks_taken[hand]}\t{t.score_changes[hand]}"
+                        for t in t_l
+                    ]
+                )
+            )
+
+        # totals
+        f.write(f"\n{splitter}")
+        f.write(splitter.join(["===\t===\t===" for _ in t_l]))
+        f.write(f"\nTotals{splitter}")
+        f.write(
+            splitter.join(
+                [
+                    f"{sum([1 for b in t.bid_history if b != str(None)])}\t{sum(t.tricks_taken)}\t{sum(t.score_changes)}"
+                    for t in t_l
+                ]
+            )
+        )
+        f.close()
+
 
 def get_play_order(lead: Player, handedness: int) -> List[Player]:
     po: List[Player] = [lead]
@@ -473,11 +527,11 @@ def get_play_order(lead: Player, handedness: int) -> List[Player]:
 
 # main method
 def main(handedness: int = 4):
-    double_deck(handedness)
+    double_deck(handedness).write_log()
 
 
 # normal euchre would be an entirely different function
-def double_deck(handedness: int = 4) -> None:
+def double_deck(handedness: int = 4) -> Game:
     plist: List[Player]
     tea_lst: Set[Team]
     victory_threshold: int = 50
@@ -518,8 +572,10 @@ def double_deck(handedness: int = 4) -> None:
         v = victory_check()
 
     # display final scores
+    print(f"Final Scores")
     for t in tea_lst:
-        print(t.score)
+        print(f"{t}: {t.score}")
+    return g
 
 
 def bidding(bid_order: List[Player], *, min_bid: int = 6) -> Player:
