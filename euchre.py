@@ -106,9 +106,9 @@ class Rank(Enum):
     LEFT_BOWER = (15, "L")
     RIGHT_BOWER = (16, "R")
 
-    def __init__(self, value: int, chr: str):
+    def __init__(self, value: int, char: str):
         self.v = value
-        self.char = chr
+        self.char = char
 
     @property
     def long_display_name(self) -> str:
@@ -386,7 +386,7 @@ class Team:
         self.score_changes: List[int] = []
 
     def __repr__(self):
-        return str(self.players)
+        return "/".join([p.name for p in self.players])
 
     @property
     def score(self):
@@ -596,7 +596,7 @@ def get_play_order(lead: Player, handedness: int) -> List[Player]:
     "-h",
     type=click.Choice(["33", "42", "63", "62", "82", "84"]),
     default="42",
-    help="10s place: Number of players, 1s place: number of teams.",
+    help="Two digits: number of players followed by number of teams.  63 = six players divided into three teams.",
 )
 @click.option(
     "--humans",
@@ -604,13 +604,23 @@ def get_play_order(lead: Player, handedness: int) -> List[Player]:
     multiple=True,
     default=[],
     type=click.INT,
-    help="index of a human player, repeatable",
+    help="List index of a human player, repeatable",
 )
-def main(handedness: int, humans: List[int]) -> Game:
+@click.option(
+    "--all-bots",
+    type=click.BOOL,
+    is_flag=True,
+    help="All-bot action for testing and demos",
+)
+def main(handedness: int, humans: List[int], all_bots: bool) -> Game:
     handedness: int = int(handedness)
     hands: int = handedness // 10
     teams: int = handedness % 10
     ppt: int = hands // teams
+    if not humans:  # assume one human player as default
+        humans = [random.randrange(hands)]
+    if all_bots:
+        humans = []
     player_handles: List[str] = {
         3: ["P1", "P2", "P3"],
         4: ["North", "East", "South", "West"],
