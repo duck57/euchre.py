@@ -28,6 +28,7 @@ from copy import deepcopy
 from datetime import datetime
 import configparser
 import click
+from collections import namedtuple
 
 
 class Color:
@@ -363,6 +364,11 @@ def power_trump_key(c: Card) -> int:
     return rank_first_key(c) + (1000 if c.suit == Suit.TRUMP else 0)
 
 
+class TrickPlay(namedtuple("TrickPlay", ["card", "played_by"])):
+    def beats(self, other: "TrickPlay", is_low: bool = False):
+        return self.card.beats(other.card, is_low)
+
+
 def make_cards_trump(h: List[Card], trump_suit: Suit):
     for card in h:
         if card.suit == trump_suit:
@@ -496,30 +502,34 @@ class Game:
     def play_trick(self, lead: Player, is_low: bool = False) -> Player:
         p: Player = lead
         po: List[Player] = []
-        trick_in_progress: List[Tuple[Card, Player]] = []
+        trick_in_progress: List[TrickPlay] = []
 
         # play the cards
         while p not in po:
             po.append(p)
-            c: Card = p.play_card(
-                trick_in_progress,
-                self.handedness,
-                is_low,
-                self.discard_pile,
-                self.unplayed_cards,
+            trick_in_progress.append(
+                TrickPlay(
+                    p.play_card(
+                        trick_in_progress,
+                        self.handedness,
+                        is_low,
+                        self.discard_pile,
+                        self.unplayed_cards,
+                    ),
+                    p,
+                )
             )
-            trick_in_progress.append((c, p))
-            # print(f"{p.name} played {repr(c)}")
+            # print(f"{p.name} played {repr(trick_in_progress[-1].card)}")
             p = p.next_player
 
         # find the winner
-        w: Tuple[Card, Player] = trick_in_progress[0]
+        w: TrickPlay = trick_in_progress[0]
         for cpt in trick_in_progress:
-            if cpt[0].beats(w[0], is_low):
+            if cpt.beats(w, is_low):
                 w = cpt
-        w[1].tricks += 1
-        # print(f"{w[1].name} won the trick")
-        return w[1]
+        w.played_by.tricks += 1
+        # print(f"{w.played_by.name} won the trick")
+        return w.played_by
 
     def write_log(self, splitter: str = "\t|\t"):
         f = open(f"{str(datetime.now()).split('.')[0]}.gamelog", "w")
@@ -594,7 +604,18 @@ def get_play_order(lead: Player, handedness: int) -> List[Player]:
 @click.option(
     "--handedness",
     "-h",
-    type=click.Choice(["33", "42", "63", "62", "82", "84"]),
+    type=click.Choice(
+        [
+            "33",
+            "42",
+            "63",
+            "62",
+            # Turn off 8-handed for now
+            # "82",
+            # "84",
+        ],
+        False,
+    ),
     default="42",
     help="Two digits: number of players followed by number of teams.  63 = six players divided into three teams.",
 )
