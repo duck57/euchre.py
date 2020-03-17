@@ -20,15 +20,24 @@ Notable differences (to match how I learned in high school calculus) include:
 Mothjab is a funny word with no current meaning.
 """
 
-from enum import Enum
+from enum import Enum, unique
 from itertools import cycle, islice
 import random
-from typing import List, Optional, Tuple, Iterable, Iterator, Set, Callable, Dict
+from typing import (
+    List,
+    Optional,
+    Tuple,
+    Iterable,
+    Iterator,
+    Set,
+    Callable,
+    Dict,
+    NamedTuple,
+)
 from copy import deepcopy
 from datetime import datetime
 import configparser
 import click
-from collections import namedtuple
 
 
 class Color:
@@ -45,6 +54,7 @@ class Color:
         return self.v
 
 
+@unique
 class Suit(Enum):
     JOKER = (0, "🃏", "JOKER", Color.WHITE)
     CLUB = (1, "♣", "SPADE", Color.BLACK)
@@ -81,13 +91,8 @@ class Suit(Enum):
     def __lt__(self, other):
         return self.v < other.v
 
-    def __eq__(self, other):
-        return self.v == other.v
 
-    def __hash__(self) -> int:
-        return self.v
-
-
+@unique
 class Rank(Enum):
     JOKER = (0, "🃟")
     ACE_LO = (1, "a")
@@ -127,12 +132,6 @@ class Rank(Enum):
 
     def __lt__(self, other):
         return self.v < other.v
-
-    def __eq__(self, other):
-        return self.v == other.v
-
-    def __hash__(self):
-        return self.v
 
 
 class Card:
@@ -194,16 +193,41 @@ def make_pinochle_deck() -> List[Card]:
     return make_euchre_deck() + make_euchre_deck()
 
 
+class CardCol(list):
+    def __str__(self) -> str:
+        return "  ".join([repr(x) for x in self])
+
+
+@unique
+class Bid(Enum):
+    LOW_NO = (None, True)
+    CLUBS = (Suit.CLUB, False)
+    DIAMONDS = (Suit.DIAMOND, False)
+    SPADES = (Suit.SPADE, False)
+    HEARTS = (Suit.HEART, False)
+    HI_NO = (None, False)
+
+    def __init__(self, s: Optional[Suit], lo: bool):
+        self.trump_suit: Optional[Suit] = s
+        self.is_low: bool = lo
+
+
 class Player:
     team: "Team"
     next_player: "Player"
-    desired_trump: Tuple[Optional[Suit], bool]
+    desired_trump: Bid
+    bid_estimates: Dict[Bid, int] = {}
 
     def __init__(self, name: str, bot: int = 1):
         self.name: str = name
         self.is_bot: int = bot
         self.tricks: int = 0
         self.hand: List[Card] = []
+        self.reset_bids()
+
+    def reset_bids(self) -> None:
+        for t in Bid:
+            self.bid_estimates[t] = 0
 
     def __str__(self):
         return f"{self.name}"
@@ -211,69 +235,65 @@ class Player:
     def __repr__(self):
         return f"Player {self.name}"
 
-    def choose_trump(self) -> Tuple[Optional[Suit], bool]:
-        if self.is_bot:
-            return self.desired_trump
+    def choose_trump(self) -> Bid:
+        if not self.is_bot:
+            self.desired_trump = Bid[
+                click.prompt(
+                    "Declare Trump",
+                    type=click.Choice([c for c in Bid.__members__], False),
+                ).upper()
+            ]
+        return self.desired_trump
 
-    def make_bid(self, valid_bids: Set[int], d: List[Card], handedness: int) -> int:
-        bid: int = 0
-        if self.is_bot:
-            # setup
-            test_bids: Dict[Tuple[Optional[Suit], bool], int] = {
-                (Suit.SPADE, False): 0,
-                (Suit.HEART, False): 0,
-                (Suit.DIAMOND, False): 0,
-                (Suit.CLUB, False): 0,
-                (None, False): 0,  # HiNo
-                (None, True): 0,  # LoNo
-            }
+    def make_bid(
+        self, valid_bids: Set[int], d: List[Card], handedness: int, min_bid: int = 0
+    ) -> int:
+        if self.is_bot and max(self.bid_estimates.values()) == 0:
+            # simulate a hand for the bots
             for card in self.hand:
                 d.remove(card)
-
-            # test the bids by simulating games
-            for t in test_bids.keys():
-                # internal setup
-                h_p: List[Card] = deepcopy(self.hand)
-                d_p: List[Card] = deepcopy(d)
-                if t[0]:
-                    make_cards_trump(h_p, t[0])
-                    make_cards_trump(d_p, t[0])
-                # largest cards first this time
-                h_p.sort(key=power_trump_key, reverse=not t[1])
-                d_p.sort(key=power_trump_key, reverse=not t[1])
-                my_trump: List[Card] = follow_suit(Suit.TRUMP, h_p)
-                my_other: List[Card] = [c for c in h_p if (c.suit != Suit.TRUMP)]
-                mystery_trump: List[Card] = follow_suit(Suit.TRUMP, d_p)
-                mystery_other: List[Card] = [c for c in d_p if (c.suit != Suit.TRUMP)]
-
-                # simulate a game
-                for card in h_p:
-                    upset_check: List[Card] = follow_suit(card.suit, d_p, False)[
-                        : handedness - 1
-                    ]
-                    if not upset_check:
-                        continue
-                    if card.beats(upset_check[-1], t[1]):
-                        test_bids[t] += 1
-                    for c in upset_check:
-                        d_p.remove(c)
-                print(f"{t}: {test_bids[t]}")
-
+            for t in Bid:
+                self.bid_estimates[t] = simulate_hand(
+                    h_p=deepcopy(self.hand), d_p=deepcopy(d), handedness=handedness, t=t
+                )
+                print(f"{t}: {self.bid_estimates[t]}")
+        elif not self.is_bot:
+            # show hand for the humans
+            self.hand.sort(key=display_key)
+            print("  ".join([repr(c) for c in self.hand]))
+        bid: int
+        if self.is_bot:
             # pick the biggest
-            bid = max(test_bids.values())
+            # any decisions based on the current winning bid should happen here
+            bid = max(self.bid_estimates.values())
             self.desired_trump = random.choice(
-                [k for k in test_bids.keys() if (test_bids[k] == bid)]
+                [k for k in self.bid_estimates.keys() if (self.bid_estimates[k] == bid)]
             )
             bid += 2 if handedness == 4 else 0  # count on two tricks from your partner
             if bid > len(self.hand):
                 bid = max(valid_bids)  # call a loner
+        else:
+            bid = int(
+                click.prompt(
+                    "How much to bid",
+                    type=click.Choice(
+                        ["0"] + [str(x) for x in sorted(valid_bids) if (x >= min_bid)],
+                        False,
+                    ),
+                )
+            )
         return bid if bid in valid_bids else 0
 
-    def trumpify_hand(self, trump_suit: Optional[Suit], is_lo: bool = False):
+    def trumpify_hand(self, trump_suit: Optional[Suit], is_lo: bool = False) -> None:
         """Marks the trump suit and sort the hands"""
         if trump_suit:
             make_cards_trump(self.hand, trump_suit)
-        self.hand.sort(reverse=is_lo, key=self.choose_sort_key(trump_suit))
+        self.hand.sort(
+            reverse=is_lo
+            if self.is_bot
+            else False,  # bots have [-1] as the "best" card
+            key=self.choose_sort_key(trump_suit),
+        )
 
     def choose_sort_key(self, trump: Optional[Suit]) -> Callable:
         if not self.is_bot:
@@ -282,7 +302,7 @@ class Player:
 
     def play_card(
         self,
-        trick_in_progress: "List[Tuple[Card, Player]]",
+        trick_in_progress: "List[TrickPlay]",
         handedness: int,
         is_low: bool,
         discard_pile: Optional[List[Card]],
@@ -306,10 +326,35 @@ class Player:
         return self.team.players - {self}
 
 
+def simulate_hand(*, h_p: List[Card], d_p: List[Card], t: Bid, handedness: int) -> int:
+    est: int = 0
+    if t.trump_suit:
+        make_cards_trump(h_p, t.trump_suit)
+        make_cards_trump(d_p, t.trump_suit)
+    # largest cards first this time
+    h_p.sort(key=power_trump_key, reverse=not t.is_low)
+    d_p.sort(key=power_trump_key, reverse=not t.is_low)
+    my_trump: List[Card] = follow_suit(Suit.TRUMP, h_p)
+    my_other: List[Card] = [c for c in h_p if (c.suit != Suit.TRUMP)]
+    mystery_trump: List[Card] = follow_suit(Suit.TRUMP, d_p)
+    mystery_other: List[Card] = [c for c in d_p if (c.suit != Suit.TRUMP)]
+
+    # simulate a hand
+    for card in h_p:
+        upset_check: List[Card] = follow_suit(card.suit, d_p, False)[: handedness - 1]
+        if not upset_check:
+            continue
+        if card.beats(upset_check[-1], t.is_low):
+            est += 1
+        for c in upset_check:
+            d_p.remove(c)
+    return est
+
+
 def human_pick_card(
     valid_cards: List[Card],
     full_hand: List[Card],
-    trick_in_progress: List[Tuple[Card, Player]],
+    trick_in_progress: "List[TrickPlay]",
     is_low: bool,
     discard_pile: List[Card],
     unplayed: List[Card],
@@ -319,18 +364,27 @@ def human_pick_card(
     proper_picks: List[int] = [
         i for i in range(len(full_hand)) if full_hand[i] in valid_cards
     ]
-    selection_indices: List[str] = []
-    for j in range(len(full_hand)):
-        selection_indices.append(f"{j:2}" if j in proper_picks else "  ")
     print("  ".join([repr(c) for c in full_hand]))
-    print("  ".join(selection_indices))
-    return valid_cards[-1]
+    print(
+        "  ".join(
+            [f"{j:2}" if j in proper_picks else "  " for j in range(len(full_hand))]
+        )
+    )
+    return full_hand[
+        int(
+            click.prompt(
+                "Index of card to play",
+                type=click.Choice([str(p) for p in proper_picks], False),
+                show_choices=False,
+            )
+        )
+    ]
 
 
 def simple_select_card(
     valid_cards: List[Card],
     full_hand: List[Card],
-    trick_in_progress: List[Tuple[Card, Player]],
+    trick_in_progress: "List[TrickPlay]",
     is_low: bool,
     discard_pile: List[Card],
     unplayed: List[Card],
@@ -342,7 +396,7 @@ def simple_select_card(
 def advanced_card_ai(
     valid_cards: List[Card],
     full_hand: List[Card],
-    trick_in_progress: List[Tuple[Card, Player]],
+    trick_in_progress: "List[TrickPlay]",
     is_low: bool,
     discard_pile: List[Card],
     unplayed: List[Card],
@@ -364,7 +418,10 @@ def power_trump_key(c: Card) -> int:
     return rank_first_key(c) + (1000 if c.suit == Suit.TRUMP else 0)
 
 
-class TrickPlay(namedtuple("TrickPlay", ["card", "played_by"])):
+class TrickPlay(NamedTuple):
+    card: Card
+    played_by: Player
+
     def beats(self, other: "TrickPlay", is_low: bool = False):
         return self.card.beats(other.card, is_low)
 
@@ -441,30 +498,24 @@ class Game:
             player.hand = deck[idx : idx + self.hand_size]
             player.tricks = 0
             idx += self.hand_size
+            player.reset_bids()
 
         # bidding
         lead: Player = bidding(po, self.valid_bids)
 
         # declare Trump
-        trump, is_low = lead.choose_trump()
-        t_d: str
-        if trump:
-            t_d = str(trump)
-        elif is_low:
-            t_d = "LoNo"
-        else:
-            t_d = "HiNo"
-        print(f"{lead} bid {lead.team.bid} {t_d}")
+        trump: Bid = lead.choose_trump()
+        print(f"{lead} bid {lead.team.bid} {trump.name}")
 
         # modify hands if trump called
         for player in po:
-            player.trumpify_hand(trump, is_low)
+            player.trumpify_hand(trump.trump_suit, trump.is_low)
             print(f"{player}: {player.hand}")
 
         # play the tricks
         hand_size: int = self.hand_size
         while hand_size > 0:
-            lead = self.play_trick(lead, is_low)
+            lead = self.play_trick(lead, trump.is_low)
             hand_size -= 1
 
         # calculate scores
@@ -493,7 +544,9 @@ class Game:
                 t.score = tr_t
 
             # bookkeeping
-            t.bid_history.append(f"{ls if ls else bid} {t_d}" if bid else str(None))
+            t.bid_history.append(
+                f"{ls if ls else bid} {trump.name}" if bid else str(None)
+            )
             t.tricks_taken.append(tr_t)
             print(f"{t}: {t.score}")
             t.bid = 0  # reset for next time
@@ -695,7 +748,7 @@ def bidding(bid_order: List[Player], valid_bids: Set[int]) -> Player:
             break
 
         # get the bid
-        bid: int = p.make_bid(valid_bids, make_pinochle_deck(), hands)
+        bid: int = p.make_bid(valid_bids, make_pinochle_deck(), hands, min_bid)
 
         # player passes
         if bid < min_bid:
