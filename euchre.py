@@ -550,9 +550,26 @@ class Team:
     def score(self, value: int):
         self.score_changes.append(value)
 
+    def hand_tab(self, hand: Optional[int], tab: str = "\t") -> str:
+        return tab.join(
+            [
+                str(self.bid_history[hand]),
+                str(self.tricks_taken[hand]),
+                str(self.score_changes[hand]),
+            ]
+            if hand is not None
+            else [
+                str(sum([1 for b in self.bid_history if b != str(None)])),
+                str(sum(self.tricks_taken)),
+                str(self.score),
+            ]
+        )
+
 
 class Game:
-    def __init__(self, players: List[Player], deck_gen: Callable):
+    def __init__(
+        self, players: List[Player], deck_gen: Callable, /, threshold: Optional[int]
+    ):
         self.trump: Optional[Suit] = None
         self.low_win: bool = False
         self.discard_pile: List[Card] = []
@@ -573,9 +590,14 @@ class Game:
         self.valid_bids: List[int] = [
             int(i) for i in c["ValidBids"][str(self.handedness)].split(",")
         ]
-        self.victory_threshold: int = c["Scores"].getint("victory")
-        self.mercy_rule: int = c["Scores"].getint("mercy")
-        self.bad_ai_end: int = c["Scores"].getint("broken_ai")
+        if threshold is not None and threshold > 0:  # negative thresholds get dunked on
+            self.victory_threshold: int = threshold
+            self.mercy_rule: int = -threshold
+            self.bad_ai_end: int = -threshold // 2
+        else:
+            self.victory_threshold: int = c["Scores"].getint("victory")
+            self.mercy_rule: int = c["Scores"].getint("mercy")
+            self.bad_ai_end: int = c["Scores"].getint("broken_ai")
 
     def play_hand(self) -> None:
         deck: List[Card] = self.deck_generator()
@@ -682,37 +704,26 @@ class Game:
         t_l: List[Team] = list(self.teams)  # give a consistent ordering
 
         # headers
-        f.write(splitter)
-        f.write(splitter.join([f"{t}\t\t" for t in t_l]))
-        f.write(f"\n{splitter}")
-        f.write(splitter.join(["Bid\tTricks Taken\tScore Change" for _ in t_l]))
-        f.write(f"\nHand{splitter}")
-        f.write(splitter.join(["===\t===\t===" for _ in t_l]))
+        f.write(splitter.join([""] + [f"{t}\t\t" for t in t_l]))
+        f.write(
+            splitter.join(["\n"] + ["Bid\tTricks Taken\tScore Change" for _ in t_l])
+        )
+        f.write(splitter.join(["\nHand"] + ["===\t===\t===" for _ in t_l]))
 
         # body
-        for hand in range(len(t_l[0].bid_history)):
-            f.write(f"\n{hand+1}{splitter}")
-            f.write(
-                splitter.join(
-                    [
-                        f"{t.bid_history[hand]}\t{t.tricks_taken[hand]}\t{t.score_changes[hand]}"
-                        for t in t_l
-                    ]
-                )
-            )
-
-        # totals
-        f.write(f"\n{splitter}")
-        f.write(splitter.join(["===\t===\t===" for _ in t_l]))
-        f.write(f"\nTotals{splitter}")
         f.write(
-            splitter.join(
+            "\n"
+            + "\n".join(
                 [
-                    f"{sum([1 for b in t.bid_history if b != str(None)])}\t{sum(t.tricks_taken)}\t{sum(t.score_changes)}"
-                    for t in t_l
+                    splitter.join([f"{hand+1}"] + [t.hand_tab(hand) for t in t_l])
+                    for hand in range(len(t_l[0].bid_history))
                 ]
             )
         )
+
+        # totals
+        f.write(splitter.join(["\n"] + ["===\t===\t===" for _ in t_l]))
+        f.write(splitter.join(["\nTotals"] + [t.hand_tab(None) for t in t_l]))
         f.close()
 
     def victory_check(self) -> Tuple[int, Optional[Team]]:
@@ -767,7 +778,11 @@ def get_play_order(lead: Player, handedness: int) -> List[Player]:
         False,
     ),
     default="42",
-    help="Two digits: number of players followed by number of teams.  63 = six players divided into three teams.",
+    help="""
+    Two digits: number of players followed by number of teams.
+    
+    63 = six players divided into three teams of 2 players each
+    """,
 )
 @click.option(
     "--humans",
@@ -783,7 +798,24 @@ def get_play_order(lead: Player, handedness: int) -> List[Player]:
     is_flag=True,
     help="All-bot action for testing and demos",
 )
-def main(handedness: int, humans: List[int], all_bots: bool) -> Game:
+@click.option(
+    "--required-points",
+    "-v",
+    "points",
+    type=click.IntRange(4, None),
+    help="""
+    Victory threshold (v): positive integer
+    
+    team.score > v: victory
+    
+    team.score < -v: mercy rule loss
+    
+    all team scores < -v/2: everyone loses 
+    """,
+)
+def main(
+    handedness: int, humans: List[int], all_bots: bool, points: Optional[int]
+) -> Game:
     handedness: int = int(handedness)
     hands: int = handedness // 10
     teams: int = handedness % 10
@@ -807,7 +839,7 @@ def main(handedness: int, humans: List[int], all_bots: bool) -> Game:
     for i in range(teams):
         print([i + j * teams for j in range(ppt)])
         Team([plist[i + j * teams] for j in range(ppt)])
-    g: Game = Game(plist, make_pinochle_deck)
+    g: Game = Game(plist, make_pinochle_deck, threshold=points)
     g.play()
     g.write_log()
     return g
