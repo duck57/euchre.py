@@ -170,6 +170,9 @@ class Card:
             return False  # must follow suit
         return (self < other) if is_low else (self > other)
 
+    def follows_suit(self, s: Suit, strict: bool = True) -> bool:
+        return self.suit == s or self.suit == Suit.TRUMP and not strict
+
 
 def display_key(c: Card) -> int:
     return (
@@ -179,11 +182,22 @@ def display_key(c: Card) -> int:
     )
 
 
+suits: List[Suit] = [Suit.HEART, Suit.SPADE, Suit.DIAMOND, Suit.CLUB]
+euchre_ranks: List[Rank] = [
+    Rank.NINE,
+    Rank.TEN,
+    Rank.JACK,
+    Rank.QUEEN,
+    Rank.KING,
+    Rank.ACE_HI,
+]
+
+
 # make a euchre deck
 def make_euchre_deck() -> List[Card]:
     deck = []
-    for rank in [Rank.NINE, Rank.TEN, Rank.JACK, Rank.QUEEN, Rank.KING, Rank.ACE_HI]:
-        for suit in [Suit.HEART, Suit.CLUB, Suit.SPADE, Suit.DIAMOND]:
+    for rank in euchre_ranks:
+        for suit in suits:
             deck.append(Card(rank, suit))
     return deck
 
@@ -216,13 +230,14 @@ class Player:
     team: "Team"
     next_player: "Player"
     desired_trump: Bid
-    bid_estimates: Dict[Bid, int] = {}
+    shoot_strength: int
 
     def __init__(self, name: str, bot: int = 1):
         self.name: str = name
         self.is_bot: int = bot
         self.tricks: int = 0
         self.hand: List[Card] = []
+        self.bid_estimates: Dict[Bid, int] = {}
         self.reset_bids()
 
     def reset_bids(self) -> None:
@@ -246,7 +261,12 @@ class Player:
         return self.desired_trump
 
     def make_bid(
-        self, valid_bids: Set[int], d: List[Card], handedness: int, min_bid: int = 0
+        self,
+        valid_bids: List[int],
+        d: List[Card],
+        handedness: int,
+        min_bid: int = 0,
+        leading_player: "Optional[Player]" = None,
     ) -> int:
         if self.is_bot and max(self.bid_estimates.values()) == 0:
             # simulate a hand for the bots
@@ -261,28 +281,35 @@ class Player:
             # show hand for the humans
             self.hand.sort(key=display_key)
             print("  ".join([repr(c) for c in self.hand]))
-        bid: int
         if self.is_bot:
             # pick the biggest
             # any decisions based on the current winning bid should happen here
-            bid = max(self.bid_estimates.values())
+            bid: int = max(self.bid_estimates.values())
             self.desired_trump = random.choice(
                 [k for k in self.bid_estimates.keys() if (self.bid_estimates[k] == bid)]
             )
-            bid += 2 if handedness == 4 else 0  # count on two tricks from your partner
-            if bid > len(self.hand):
-                bid = max(valid_bids)  # call a loner
+            # don't outbid your partner (within reason)
+            if leading_player in self.teammates and bid - min_bid < 2:
+                return 0
+            # can you do it by yourself?
+            if bid == len(self.hand) - 1:
+                return valid_bids[-2]  # call a shooter
+            elif bid == len(self.hand):
+                return valid_bids[-1]  # call a loner
+            # don't bid outrageously if you don't have to
+            if bid in range(min_bid, min_bid + self.shoot_strength + 2):
+                return bid
+            # count on two tricks from your partner
+            return bid + self.shoot_strength * len(self.teammates)
         else:
-            bid = int(
+            return int(
                 click.prompt(
                     "How much to bid",
                     type=click.Choice(
-                        ["0"] + [str(x) for x in sorted(valid_bids) if (x >= min_bid)],
-                        False,
+                        ["0"] + [str(x) for x in valid_bids if (x >= min_bid)], False,
                     ),
                 )
             )
-        return bid if bid in valid_bids else 0
 
     def trumpify_hand(self, trump_suit: Optional[Suit], is_lo: bool = False) -> None:
         """Marks the trump suit and sort the hands"""
@@ -308,13 +335,11 @@ class Player:
         discard_pile: Optional[List[Card]],
         unplayed: Optional[List[Card]],
     ) -> Card:
-        valid_cards: List[Card] = []
-        if trick_in_progress:
-            valid_cards = follow_suit(
-                trick_in_progress[0][0].suit, self.hand, strict=True
-            )
-        if not valid_cards:
-            valid_cards = self.hand
+        valid_cards: List[Card] = follow_suit(
+            trick_in_progress[0].card.suit if trick_in_progress else None,
+            self.hand,
+            strict=None,
+        )
         c: Card = {0: human_pick_card, 1: simple_select_card, 2: advanced_card_ai}[
             self.is_bot
         ](valid_cards, self.hand, trick_in_progress, is_low, discard_pile, unplayed)
@@ -325,29 +350,95 @@ class Player:
     def teammates(self) -> "Set[Player]":
         return self.team.players - {self}
 
+    def send_shooter(self, cards: int) -> List[Card]:
+        if not cards:
+            return []
+        if self.is_bot:
+            return self.hand[-cards:]
+        # human
+        # display hand
+        # prompt for card indices until you have enough
+        return self.hand[-cards:]
+
+    def receive_shooter(self, handedness: int, trump: Suit) -> None:
+        for p in self.teammates:
+            self.hand += p.send_shooter(self.shoot_strength)
+        # discard extra cards
+        for _ in range(len(self.teammates) * self.shoot_strength):
+            pass
+        pass
+
 
 def simulate_hand(*, h_p: List[Card], d_p: List[Card], t: Bid, handedness: int) -> int:
-    est: int = 0
+    # you: int = 0
     if t.trump_suit:
         make_cards_trump(h_p, t.trump_suit)
         make_cards_trump(d_p, t.trump_suit)
     # largest cards first this time
     h_p.sort(key=power_trump_key, reverse=not t.is_low)
     d_p.sort(key=power_trump_key, reverse=not t.is_low)
-    my_trump: List[Card] = follow_suit(Suit.TRUMP, h_p)
-    my_other: List[Card] = [c for c in h_p if (c.suit != Suit.TRUMP)]
-    mystery_trump: List[Card] = follow_suit(Suit.TRUMP, d_p)
-    mystery_other: List[Card] = [c for c in d_p if (c.suit != Suit.TRUMP)]
+    # my_trump: List[Card] = follow_suit(Suit.TRUMP, h_p)
+    # my_other: List[Card] = [c for c in h_p if (c.suit != Suit.TRUMP)]
+    # mystery_trump: List[Card] = follow_suit(Suit.TRUMP, d_p)
+    # mystery_other: List[Card] = [c for c in d_p if (c.suit != Suit.TRUMP)]
 
-    # simulate a hand
-    for card in h_p:
-        upset_check: List[Card] = follow_suit(card.suit, d_p, False)[: handedness - 1]
-        if not upset_check:
-            continue
-        if card.beats(upset_check[-1], t.is_low):
-            est += 1
-        for c in upset_check:
-            d_p.remove(c)
+    return sum(
+        [
+            simple_estimate_tricks_by_suit(
+                my_suit=follow_suit(s, h_p),
+                others=follow_suit(s, d_p),
+                is_low=t.is_low,
+                is_trump=(s == Suit.TRUMP),
+            )
+            for s in suits + [Suit.TRUMP]
+        ]
+    )
+
+    # # simulate a hand
+    # while h_p:
+    #     # pick the smallest card that beats everything else, if any
+    #     gain_trick: bool = False
+    #     lead_suit: Suit = Suit.JOKER
+    #     for card in h_p:
+    #         best_opp: Card = follow_suit(card.suit, d_p, None)[-1]
+    #         if not best_opp.beats(card, t.is_low):
+    #             gain_trick = True
+    #         if gain_trick:
+    #             h_p.remove(card)
+    #             lead_suit = card.suit
+    #             you += 1
+    #             break
+    #     if not gain_trick:
+    #         lead_suit = random.choice([Suit.HEART, Suit.SPADE, Suit.DIAMOND, Suit.CLUB])
+    #         others += 1
+    #         h_p.remove(follow_suit(lead_suit, h_p, None)[0])
+    #     fs_cards: List[Card] = follow_suit(lead_suit, d_p, gain_trick)
+    #     fixed_count: int = 0
+    #     if fs_cards:
+    #         d_p.remove(fs_cards.pop(-1))  # the best card was played
+    #         fixed_count += 1
+    #     if fs_cards:
+    #         d_p.remove(fs_cards.pop(random.randrange(len(fs_cards))))
+    #         fixed_count += 1
+    #     for _ in range(handedness - 1 - fixed_count):  # best card and player are out
+    #         d_p.pop(random.randrange(len(d_p)))
+    # return you
+
+
+def simple_estimate_tricks_by_suit(
+    my_suit: List[Card], others: List[Card], is_low: bool, is_trump: bool
+) -> int:
+    est: int = 0
+    for rank in (
+        euchre_ranks
+        if is_low
+        else ([Rank.RIGHT_BOWER, Rank.LEFT_BOWER] if is_trump else [])
+        + list(reversed(euchre_ranks))
+    ):
+        count: int = len([x for x in my_suit if (x.rank == rank)])
+        est += count
+        if not count:
+            break
     return est
 
 
@@ -474,12 +565,14 @@ class Game:
         for i in range(self.handedness - 1):
             players[i].next_player = players[i + 1]
         players[self.handedness - 1].next_player = players[0]
+        for p in players:
+            p.shoot_strength = {3: 3, 4: 2, 6: 1, 8: 1}[self.handedness]
 
         c = configparser.ConfigParser()
         c.read("constants.cfg")
-        self.valid_bids: Set[int] = set(
-            [int(i) for i in c["ValidBids"][str(self.handedness)].split(",")]
-        )
+        self.valid_bids: List[int] = [
+            int(i) for i in c["ValidBids"][str(self.handedness)].split(",")
+        ]
         self.victory_threshold: int = c["Scores"].getint("victory")
         self.mercy_rule: int = c["Scores"].getint("mercy")
         self.bad_ai_end: int = c["Scores"].getint("broken_ai")
@@ -623,16 +716,16 @@ class Game:
         f.close()
 
     def victory_check(self) -> Tuple[int, Optional[Team]]:
-        scores_all_bad: bool = True
-        for team in self.teams:
-            if team.score >= self.victory_threshold:
-                return 1, team
-            if team.score < self.mercy_rule:
-                return -1, team
-            if team.score > self.bad_ai_end:
-                scores_all_bad = False
-        if scores_all_bad:
-            return -1, None
+        scorecard: List[Team] = sorted(self.teams, key=score_key)
+        best_score: int = scorecard[-1].score
+        if best_score < self.bad_ai_end:
+            return -2, None  # everyone went too far negative
+        if best_score == scorecard[-2].score:
+            return 0, None  # keep playing for a tie
+        if best_score > self.victory_threshold:  # a team won
+            return 1, scorecard[-1]
+        if scorecard[0].score < self.mercy_rule:  # a team lost
+            return -1, scorecard[0]  # should never tie for last
         return 0, None
 
     def play(self) -> None:
@@ -643,6 +736,10 @@ class Game:
         print(f"Final Scores")
         for t in self.teams:
             print(f"{t}: {t.score}")
+
+
+def score_key(t: Team) -> int:
+    return t.score
 
 
 def get_play_order(lead: Player, handedness: int) -> List[Player]:
@@ -722,11 +819,11 @@ def make_players(handles: List[str]) -> List[Player]:
     return [Player(c[h]["name"], int(c[h]["is_bot"])) for h in handles]
 
 
-def bidding(bid_order: List[Player], valid_bids: Set[int]) -> Player:
+def bidding(bid_order: List[Player], valid_bids: List[int]) -> Player:
     first_round: bool = True
     count: int = 1
     hands: int = len(bid_order)
-    wp: Player
+    wp: Optional[Player] = None
     wb: int = 0
     bid_order = cycle(bid_order)
     min_bid: int = min(valid_bids)
@@ -738,6 +835,8 @@ def bidding(bid_order: List[Player], valid_bids: Set[int]) -> Player:
             if first_round:  # stuck the dealer
                 wb = min_bid
                 print(f"Dealer {p} got stuck with {min_bid}")
+                if p.is_bot:  # dealer picks suit
+                    p.make_bid(valid_bids, make_pinochle_deck(), hands)
                 wp = p
             else:  # someone won the bid
                 wb = min_bid - 1
@@ -745,10 +844,11 @@ def bidding(bid_order: List[Player], valid_bids: Set[int]) -> Player:
 
         # end bidding early for a loner
         if min_bid > max_bid:
+            wb = max_bid
             break
 
         # get the bid
-        bid: int = p.make_bid(valid_bids, make_pinochle_deck(), hands, min_bid)
+        bid: int = p.make_bid(valid_bids, make_pinochle_deck(), hands, min_bid, wp)
 
         # player passes
         if bid < min_bid:
@@ -767,10 +867,21 @@ def bidding(bid_order: List[Player], valid_bids: Set[int]) -> Player:
     return wp
 
 
-def follow_suit(s: Optional[Suit], cs: List[Card], strict: bool = True) -> List[Card]:
+def follow_suit(
+    s: Optional[Suit], cs: List[Card], strict: Optional[bool] = True
+) -> List[Card]:
+    # strict filtering
     if not s:
         return cs
-    return [c for c in cs if (c.suit == s or c.suit == Suit.TRUMP and not strict)]
+    if strict is not None:
+        return [c for c in cs if (c.follows_suit(s, strict))]
+
+    # strict is None gives cards that follow suit
+    if valid_cards := follow_suit(s, cs, True):
+        return valid_cards
+    # if valid_cards := follow_suit(s, cs, False):
+    #     return valid_cards
+    return cs
 
 
 if __name__ == "__main__":
