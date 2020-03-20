@@ -41,11 +41,18 @@ import configparser
 import click
 
 o: Optional[TextIO] = None
+debug: Optional[bool] = False
 
 
 def p(msg):
     global o
     click.echo(msg, o)
+
+
+def px(msg) -> None:
+    global debug
+    if debug:
+        p(msg)
 
 
 class Color:
@@ -354,7 +361,7 @@ class Player:
             return key_display4human
         return key_trump_power
 
-    def play_card(self, trick_in_progress: "List[TrickPlay]", /, **kwargs,) -> Card:
+    def play_card(self, trick_in_progress: "Trick", /, **kwargs,) -> Card:
         for x in trick_in_progress:
             self.card_count[x.card] -= 1
         c: Card = {0: pick_card_human, 1: pick_card_simple, 2: pick_card_advance}[
@@ -451,7 +458,7 @@ def estimate_tricks_by_suit(
     ):
         me: List[Card] = match_by_rank(my_suit, rank)
         oth: List[Card] = match_by_rank(mystery_suit, rank)
-        p((me, rank, oth))
+        # p((me, rank, oth))  # debugging
         est.extend(me)
         if oth and (strict or not me and not strict):
             break  # there are mystery cards that beat your cards
@@ -459,7 +466,7 @@ def estimate_tricks_by_suit(
 
 
 def pick_card_human(
-    valid_cards: Hand, full_hand: Hand, trick_in_progress: "List[TrickPlay]", **kwargs
+    valid_cards: Hand, full_hand: Hand, trick_in_progress: "Trick", **kwargs
 ) -> Card:
     p(trick_in_progress if trick_in_progress else "Choose the lead.")
     proper_picks: List[int] = [
@@ -490,7 +497,7 @@ def pick_card_simple(valid_cards: Hand, **kwargs,) -> Card:
 def pick_card_advance(valid_cards: Hand, **kwargs,) -> Card:
     pl: Player = kwargs.get("pl")
     my_hand: Hand = pl.hand
-    tp: List[TrickPlay] = kwargs.get("trick_in_progress")
+    tp: Trick = kwargs.get("trick_in_progress")
     is_low: bool = kwargs.get("is_low")
     handedness: int = kwargs.get("handedness")
     discard: Hand = kwargs.get("discard")
@@ -498,7 +505,7 @@ def pick_card_advance(valid_cards: Hand, **kwargs,) -> Card:
     broken: Dict[Suit, Union[Team, None, bool]] = kwargs.get("broken_suits")
     trump: Optional[Suit] = kwargs.get("trump")
 
-    def winning_leads(ss: List[Suit]) -> List[Card]:
+    def winning_leads(ss: List[Suit], st: bool = True) -> List[Card]:
         wl: List[Card] = []
         for s in ss:
             wl.extend(
@@ -506,36 +513,50 @@ def pick_card_advance(valid_cards: Hand, **kwargs,) -> Card:
                     follow_suit(s, valid_cards, True),
                     follow_suit(s, unplayed, True),
                     is_low,
-                    strict=True,
+                    strict=st,
                 )
             )
         return wl
 
     if not tp:  # you have the lead
-        check_suits: List[Suit] = [
+        safer_suits: List[Suit] = [
             s for s in broken.keys() if broken[s] is False or broken[s] == pl.team
         ]
         w: List[Card] = []
-        if check_suits:  # unbroken suits to lead aces
-            p("Checking suits")
-            w += winning_leads(check_suits)
+        if safer_suits:  # unbroken suits to lead aces
+            px("Checking suits")
+            w += winning_leads(safer_suits)
         else:  # lead with good trump
-            p("Leading with a good trump")
+            px("Leading with a good trump")
             w += winning_leads([Suit.TRUMP])
         if not w:  # try a risky ace
-            p("Risky bet")
-            w += winning_leads(suits)
+            px("Risky bet")
+            w += winning_leads(suits, st=bool(pl.teammates))
         if not w and pl.teammates:  # seamless passing of the lead
             is_low = not is_low
-            w += winning_leads(suits + [Suit.TRUMP])
-            p("Lead pass")
+            w += winning_leads(suits + [Suit.TRUMP], st=False)
+            px("Lead pass")
         if not w:  # YOLO time
-            p("YOLO")
+            px("YOLO")
             return random.choice(valid_cards)
-        p(w)
+        px(w)
         return random.choice(w)
     # you don't have the lead
-    return valid_cards[-1]
+    # win if you can (and the current lead isn't on your team)
+    # play garbage otherwise
+    junk_ranks: Set[Rank] = (
+        {Rank.ACE_HI, Rank.KING} if is_low else {Rank.NINE, Rank.TEN, Rank.JACK}
+    ) | {Rank.QUEEN}
+    wc, wp = tp.winner(is_low)
+    w = Hand(c for c in valid_cards if c.beats(wc, is_low))
+    junk_cards = Hand(h for h in valid_cards if h not in w)
+    if w:  # you have something that can win
+        if wp in pl.teammates and junk_cards:  # your partner is winning
+            if wc.rank in junk_ranks:  # but their card is rubbish
+                return random.choice(w)
+            return random.choice(junk_cards)
+        return random.choice(w)
+    return random.choice(junk_cards)
 
 
 def match_by_rank(c: Iterable[Card], r: Rank) -> List[Card]:
@@ -560,6 +581,17 @@ class TrickPlay(NamedTuple):
 
     def beats(self, other: "TrickPlay", is_low: bool = False):
         return self.card.beats(other.card, is_low)
+
+
+class Trick(List[TrickPlay]):
+    def winner(self, is_low: bool) -> Optional[TrickPlay]:
+        if not self:
+            return None
+        w: TrickPlay = self[0]
+        for cpt in self:
+            if cpt.beats(w, is_low):
+                w = cpt
+        return w
 
 
 class Team:
@@ -734,7 +766,7 @@ class Game:
     def play_trick(self, lead: Player, is_low: bool = False) -> Player:
         pl: Player = lead
         po: List[Player] = []
-        trick_in_progress: List[TrickPlay] = []
+        trick_in_progress: Trick = Trick()
 
         # play the cards
         while pl not in po:
@@ -758,12 +790,8 @@ class Game:
             pl = pl.next_player
 
         # find the winner
-        w: TrickPlay = trick_in_progress[0]
-        l: Card = w.card
-        for cpt in trick_in_progress:
-            if cpt.beats(w, is_low):
-                w = cpt
-            self.discard_pile.append(cpt.card)
+        w: TrickPlay = trick_in_progress.winner(is_low)
+        l: Card = trick_in_progress[0].card
         w.played_by.tricks += 1
         p(f"{w.played_by.name} won the trick\n")
         if w.card.suit != l.suit:
@@ -899,11 +927,13 @@ def main(
     teams: int = handedness % 10
     ppt: int = hands // teams
     global o
+    global debug
     if not humans:  # assume one human player as default
         humans = [random.randrange(hands)]
     if all_bots:
         humans = []
         o = open(f"{str(datetime.now()).split('.')[0]}.gameplay", "w")
+        debug = True
     player_handles: List[str] = {
         3: ["P1", "P2", "P3"],
         4: ["North", "East", "South", "West"],
@@ -978,7 +1008,9 @@ def bidding(bid_order: List[Player], valid_bids: List[int]) -> Player:
     return wp
 
 
-def follow_suit(s: Optional[Suit], cs: Iterable[Card], strict: Optional[bool] = True) -> Hand:
+def follow_suit(
+    s: Optional[Suit], cs: Iterable[Card], strict: Optional[bool] = True
+) -> Hand:
     # strict filtering
     if not s:
         return cs if isinstance(cs, Hand) else Hand(cs)
