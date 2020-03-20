@@ -25,3 +25,4 @@ Notable differences (to match how I learned in high school calculus) include:
   * `-v` modifies the victory thresholds, useful if you're short on time
   * `--all-bots` lets the computer play itself and puts the output to a file
 * Running `euchre.py` without options plays a 4-handed game with one human player in a random seat
+* There is a walrus or two, so Python 3.8 is required 
