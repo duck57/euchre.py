@@ -23,6 +23,7 @@ Mothjab is a funny word with no current meaning.
 from enum import Enum, unique
 from itertools import cycle
 import random
+from pathlib import Path
 from typing import (
     List,
     Optional,
@@ -39,9 +40,11 @@ from copy import deepcopy
 from datetime import datetime
 import configparser
 import click
+import os
 
 o: Optional[TextIO] = None
 debug: Optional[bool] = False
+log_dir: str = "logs/"
 
 
 def p(msg):
@@ -356,7 +359,7 @@ class Player:
         )
         self.card_count = reset_unplayed(self.hand, ts=trump_suit)
 
-    def choose_sort_key(self, trump: Optional[Suit]) -> Callable:
+    def choose_sort_key(self, trump: Optional[Suit] = None) -> Callable:
         if not self.is_bot:
             return key_display4human
         return key_trump_power
@@ -385,23 +388,35 @@ class Player:
     def teammates(self) -> "Set[Player]":
         return self.team.players - {self}
 
+    # the following two methods could be re-used for hearts
+
     def send_shooter(self, cards: int) -> List[Card]:
         if not cards:
             return []
         if self.is_bot:
             return self.hand[-cards:]
         # human
-        # display hand
-        # prompt for card indices until you have enough
-        return self.hand[-cards:]
+        return [
+            pick_card_human(self.hand, self.hand, None, p_word="send")
+            for _ in range(cards)
+        ]
 
-    def receive_shooter(self, handedness: int, trump: Suit) -> None:
+    def receive_shooter(self, handedness: int, bid: Bid) -> None:
         for pl in self.teammates:
             self.hand += pl.send_shooter(self.shoot_strength)
+        self.hand.sort(
+            key=self.choose_sort_key(), reverse=bid.is_low if self.is_bot else False
+        )
         # discard extra cards
         for _ in range(len(self.teammates) * self.shoot_strength):
-            pass  # TODO shooters
-        pass
+            if self.is_bot:
+                self.hand.remove(
+                    pick_card_advance(self.hand, is_low=not bid.is_low, pl=self)
+                )
+            else:
+                self.hand.remove(
+                    pick_card_human(self.hand, self.hand, None, p_word="discard")
+                )
 
 
 def simulate_hand(*, h_p: Hand, d_p: Hand, t: Bid, handedness: int) -> int:
@@ -466,9 +481,10 @@ def estimate_tricks_by_suit(
 
 
 def pick_card_human(
-    valid_cards: Hand, full_hand: Hand, trick_in_progress: "Trick", **kwargs
+    valid_cards: Hand, full_hand: Hand, trick_in_progress: "Optional[Trick]", **kwargs
 ) -> Card:
-    p(trick_in_progress if trick_in_progress else "Choose the lead.")
+    if trick_in_progress is not None:
+        p(trick_in_progress if trick_in_progress else "Choose the lead.")
     proper_picks: List[int] = [
         i for i in range(len(full_hand)) if full_hand[i] in valid_cards
     ]
@@ -481,7 +497,7 @@ def pick_card_human(
     return full_hand[
         int(
             click.prompt(
-                "Index of card to play",
+                f"Index of card to {kwargs.get('p_word', 'play')}",
                 type=click.Choice([str(pp) for pp in proper_picks], False),
                 show_choices=False,
                 default=proper_picks[0] if len(proper_picks) == 1 else None,
@@ -501,7 +517,7 @@ def pick_card_advance(valid_cards: Hand, **kwargs,) -> Card:
     is_low: bool = kwargs.get("is_low")
     handedness: int = kwargs.get("handedness")
     discard: Hand = kwargs.get("discard")
-    unplayed: Hand = kwargs.get("unplayed")
+    unplayed: Hand = kwargs.get("unplayed", Hand())
     broken: Dict[Suit, Union[Team, None, bool]] = kwargs.get("broken_suits")
     trump: Optional[Suit] = kwargs.get("trump")
 
@@ -521,7 +537,7 @@ def pick_card_advance(valid_cards: Hand, **kwargs,) -> Card:
     if not tp:  # you have the lead
         safer_suits: List[Suit] = [
             s for s in broken.keys() if broken[s] is False or broken[s] == pl.team
-        ]
+        ] if broken else suits
         w: List[Card] = []
         if safer_suits:  # unbroken suits to lead aces
             px("Checking suits")
@@ -655,7 +671,12 @@ def reset_unplayed(
 
 class Game:
     def __init__(
-        self, players: List[Player], deck_gen: Callable, *, threshold: Optional[int]
+        self,
+        players: List[Player],
+        deck_gen: Callable,
+        *,
+        threshold: Optional[int],
+        start: str = str(datetime.now()).split(".")[0],
     ):
         self.trump: Optional[Suit] = None
         self.low_win: bool = False
@@ -670,6 +691,7 @@ class Game:
         players[self.handedness - 1].next_player = players[0]
         for pl in players:
             pl.shoot_strength = {3: 3, 4: 2, 6: 1, 8: 1}[self.handedness]
+        self.start_time: str = start
 
         c = configparser.ConfigParser()
         c.read("constants.cfg")
@@ -723,9 +745,16 @@ class Game:
         [player.trumpify_hand(trump.trump_suit, trump.is_low) for player in po]
         self.suit_safety[trump.trump_suit] = None
 
+        # check for shooters and loners
+        lone: Optional[Player] = None
+        if lead.team.bid > self.hand_size:
+            if lead.team.bid < 2 * self.hand_size:
+                lead.receive_shooter(self.handedness, trump)
+            lone = lead
+
         # play the tricks
         for _ in range(self.hand_size):
-            lead = self.play_trick(lead, trump.is_low)
+            lead = self.play_trick(lead, trump.is_low, lone)
 
         # calculate scores
         p(f"Hand {hn} scores:")
@@ -743,7 +772,7 @@ class Game:
 
                 if tr_t < bid:
                     p(f"{t} got Euchred and fell {bid - tr_t} short of {bid}")
-                    t.score = -bid
+                    t.score = -bid if not ls else -round(ls * 5 / 6)
                 elif ls:
                     p(f"Someone on {t} won the loner, the absolute madman!")
                     t.score = ls
@@ -763,13 +792,18 @@ class Game:
             t.bid = 0  # reset for next time
         self.current_dealer = self.current_dealer.next_player
 
-    def play_trick(self, lead: Player, is_low: bool = False) -> Player:
+    def play_trick(
+        self, lead: Player, is_low: bool = False, lone: Optional[Player] = None
+    ) -> Player:
         pl: Player = lead
         po: List[Player] = []
         trick_in_progress: Trick = Trick()
 
         # play the cards
         while pl not in po:
+            if lone and pl in lone.teammates:
+                pl = pl.next_player
+                continue
             trick_in_progress.append(
                 TrickPlay(
                     pl.play_card(
@@ -801,14 +835,15 @@ class Game:
         return w.played_by
 
     def write_log(self, splitter: str = "\t|\t"):
-        f: TextIO = open(f"{str(datetime.now()).split('.')[0]}.gamelog", "w")
+        stop_time: str = str(datetime.now()).split(".")[0]
+        f: TextIO = open(os.path.join(log_dir, f"{self.start_time}.gamelog"), "w")
         t_l: List[Team] = list(self.teams)  # give a consistent ordering
 
         def w(msg):
             click.echo(msg, f)
 
         # headers
-        w(splitter.join([""] + [f"{t}\t\t" for t in t_l]))
+        w(splitter.join([self.start_time] + [f"{t}\t\t" for t in t_l]))
         w(splitter.join([""] + ["Bid\tTricks Taken\tScore Change" for _ in t_l]))
         w(splitter.join(["Hand"] + ["===\t===\t===" for _ in t_l]))
         w(  # body
@@ -820,7 +855,7 @@ class Game:
             )
         )
         # totals
-        w(splitter.join([""] + ["===\t===\t===" for _ in t_l]))
+        w(splitter.join([stop_time] + ["===\t===\t===" for _ in t_l]))
         w(splitter.join(["Totals"] + [t.hand_tab(None) for t in t_l]))
         f.close()
 
@@ -926,13 +961,15 @@ def main(
     hands: int = handedness // 10
     teams: int = handedness % 10
     ppt: int = hands // teams
+    start_time: str = str(datetime.now()).split(".")[0]
     global o
     global debug
     if not humans:  # assume one human player as default
         humans = [random.randrange(hands)]
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
     if all_bots:
         humans = []
-        o = open(f"{str(datetime.now()).split('.')[0]}.gameplay", "w")
+        o = open(os.path.join(log_dir, f"{start_time}.gameplay"), "w")
         debug = True
     player_handles: List[str] = {
         3: ["P1", "P2", "P3"],
@@ -948,7 +985,7 @@ def main(
             plist[h].is_bot = 0
     # set up teams
     [Team([plist[i + j * teams] for j in range(ppt)]) for i in range(teams)]
-    g: Game = Game(plist, make_pinochle_deck, threshold=points)
+    g: Game = Game(plist, make_pinochle_deck, threshold=points, start=start_time)
     g.play()
     g.write_log()
     return g
