@@ -21,14 +21,13 @@ Mothjab is a funny word with no current meaning.
 """
 
 from enum import Enum, unique
-from itertools import cycle, islice
+from itertools import cycle
 import random
 from typing import (
     List,
     Optional,
     Tuple,
     Iterable,
-    Iterator,
     Set,
     Callable,
     Dict,
@@ -399,17 +398,6 @@ class Player:
 
 
 def simulate_hand(*, h_p: Hand, d_p: Hand, t: Bid, handedness: int) -> int:
-    # you: int = 0
-    # h_p.trumpify(t.trump_suit)
-    # d_p.trumpify(t.trump_suit)
-    # largest cards first this time
-    # h_p.sort(key=key_trump_power, reverse=not t.is_low)
-    # d_p.sort(key=key_trump_power, reverse=not t.is_low)
-    # my_trump: Hand = follow_suit(Suit.TRUMP, h_p)
-    # my_other: Hand = [c for c in h_p if (c.suit != Suit.TRUMP)]
-    # mystery_trump: Hand = follow_suit(Suit.TRUMP, d_p)
-    # mystery_other: Hand = [c for c in d_p if (c.suit != Suit.TRUMP)]
-
     return sum(
         [
             len(
@@ -437,36 +425,6 @@ def simulate_hand(*, h_p: Hand, d_p: Hand, t: Bid, handedness: int) -> int:
             for s in suits + [Suit.TRUMP]
         ]
     )
-
-    # # simulate a hand
-    # while h_p:
-    #     # pick the smallest card that beats everything else, if any
-    #     gain_trick: bool = False
-    #     lead_suit: Suit = Suit.JOKER
-    #     for card in h_p:
-    #         best_opp: Card = follow_suit(card.suit, d_p, None)[-1]
-    #         if not best_opp.beats(card, t.is_low):
-    #             gain_trick = True
-    #         if gain_trick:
-    #             h_p.remove(card)
-    #             lead_suit = card.suit
-    #             you += 1
-    #             break
-    #     if not gain_trick:
-    #         lead_suit = random.choice([Suit.HEART, Suit.SPADE, Suit.DIAMOND, Suit.CLUB])
-    #         others += 1
-    #         h_p.remove(follow_suit(lead_suit, h_p, None)[0])
-    #     fs_cards: Hand = follow_suit(lead_suit, d_p, gain_trick)
-    #     fixed_count: int = 0
-    #     if fs_cards:
-    #         d_p.remove(fs_cards.pop(-1))  # the best card was played
-    #         fixed_count += 1
-    #     if fs_cards:
-    #         d_p.remove(fs_cards.pop(random.randrange(len(fs_cards))))
-    #         fixed_count += 1
-    #     for _ in range(handedness - 1 - fixed_count):  # best card and player are out
-    #         d_p.pop(random.randrange(len(d_p)))
-    # return you
 
 
 def estimate_tricks_by_suit(
@@ -517,7 +475,7 @@ def pick_card_human(
         int(
             click.prompt(
                 "Index of card to play",
-                type=click.Choice([str(p) for p in proper_picks], False),
+                type=click.Choice([str(pp) for pp in proper_picks], False),
                 show_choices=False,
                 default=proper_picks[0] if len(proper_picks) == 1 else None,
             )
@@ -616,7 +574,7 @@ class Team:
         self.score_changes: List[int] = []
 
     def __repr__(self):
-        return "/".join([p.name for p in self.players])
+        return "/".join([pl.name for pl in self.players])
 
     @property
     def score(self):
@@ -1020,10 +978,10 @@ def bidding(bid_order: List[Player], valid_bids: List[int]) -> Player:
     return wp
 
 
-def follow_suit(s: Optional[Suit], cs: Hand, strict: Optional[bool] = True) -> Hand:
+def follow_suit(s: Optional[Suit], cs: Iterable[Card], strict: Optional[bool] = True) -> Hand:
     # strict filtering
     if not s:
-        return cs
+        return cs if isinstance(cs, Hand) else Hand(cs)
     if strict is not None:
         return Hand(c for c in cs if (c.follows_suit(s, strict)))
 
@@ -1032,7 +990,7 @@ def follow_suit(s: Optional[Suit], cs: Hand, strict: Optional[bool] = True) -> H
         return valid_cards
     # if valid_cards := follow_suit(s, cs, False):
     #     return valid_cards
-    return cs
+    return follow_suit(None, cs, None)
 
 
 if __name__ == "__main__":
