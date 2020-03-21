@@ -442,27 +442,21 @@ class Player:
                 )
 
 
-def simulate_hand(*, h_p: Hand, d_p: Hand, t: Bid, handedness: int) -> int:
+def simulate_hand(*, h_p: Hand, d_p: Hand, t: Bid, **kwargs) -> int:
+    def slice_by_suit(h: Hand, s: Suit) -> Hand:
+        return follow_suit(
+            s,
+            sorted(
+                h.trumpify(t.trump_suit), key=key_trump_power, reverse=not t.is_low,
+            ),
+        )
+
     return sum(
         [
             len(
                 estimate_tricks_by_suit(
-                    my_suit=follow_suit(
-                        s,
-                        sorted(
-                            h_p.trumpify(t.trump_suit),
-                            key=key_trump_power,
-                            reverse=not t.is_low,
-                        ),
-                    ),
-                    mystery_suit=follow_suit(
-                        s,
-                        sorted(
-                            d_p.trumpify(t.trump_suit),
-                            key=key_trump_power,
-                            reverse=not t.is_low,
-                        ),
-                    ),
+                    my_suit=slice_by_suit(h_p, s),
+                    mystery_suit=slice_by_suit(d_p, s),
                     is_low=t.is_low,
                     is_trump=(s == Suit.TRUMP),
                 )
