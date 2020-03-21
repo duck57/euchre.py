@@ -212,6 +212,15 @@ euchre_ranks: List[Rank] = [
     Rank.KING,
     Rank.ACE_HI,
 ]
+poker_ranks: List[Rank] = [
+    Rank.TWO,
+    Rank.THREE,
+    Rank.FOUR,
+    Rank.FIVE,
+    Rank.SIX,
+    Rank.SEVEN,
+    Rank.EIGHT,
+] + euchre_ranks
 
 
 class Hand(List[Card]):
@@ -235,14 +244,26 @@ class Hand(List[Card]):
         return self
 
 
-# make a euchre deck
+def make_deck(r: List[Rank], s: List[Suit]) -> Hand:
+    return Hand(Card(rank, suit) for rank in r for suit in s)
+
+
 def make_euchre_deck() -> Hand:
-    return Hand(Card(rank, suit) for rank in euchre_ranks for suit in suits)
+    """Single euchre deck"""
+    return make_deck(euchre_ranks, suits)
 
 
-# a.k.a. a double euchre deck
 def make_pinochle_deck() -> Hand:
+    """a.k.a. a double euchre deck"""
     return make_euchre_deck() + make_euchre_deck()
+
+
+def make_standard_deck() -> Hand:
+    """
+    Standard 52 card deck
+    Perfect for 52 pick-up
+    """
+    return make_deck(poker_ranks, suits)
 
 
 @unique
@@ -407,6 +428,8 @@ class Player:
         self.hand.sort(
             key=self.choose_sort_key(), reverse=bid.is_low if self.is_bot else False
         )
+        if isinstance(self.hand[-1], Card):
+            return  # keep old rules without deleting code
         # discard extra cards
         for _ in range(len(self.teammates) * self.shoot_strength):
             if self.is_bot:
@@ -766,15 +789,15 @@ class Game:
                 tr_t += pl.tricks
             if bid:
                 # loners and shooters
-                if bid > self.hand_size:
+                if lone:
                     ls = bid
                     bid = self.hand_size
 
                 if tr_t < bid:
                     p(f"{t} got Euchred and fell {bid - tr_t} short of {bid}")
-                    t.score = -bid if not ls else -round(ls * 5 / 6)
+                    t.score = -bid if not ls else -bid * 3 // 2
                 elif ls:
-                    p(f"Someone on {t} won the loner, the absolute madman!")
+                    p(f"{lone} won all alone, the absolute madman!")
                     t.score = ls
                 else:
                     p(f"{t} beat their bid of {bid} with {tr_t} tricks")
