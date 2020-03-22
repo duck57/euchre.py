@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!venv/bin/python
 # coding=UTF-8
 # -*- coding: UTF-8 -*-
 # vim: set fileencoding=UTF-8 :
@@ -20,277 +20,16 @@ Notable differences (to match how I learned in high school calculus) include:
 Mothjab is a funny word with no current meaning.
 """
 
-from enum import Enum, unique
-from itertools import cycle
-import random
-from pathlib import Path
-from typing import (
-    List,
-    Optional,
-    Tuple,
-    Iterable,
-    Set,
-    Callable,
-    Dict,
-    NamedTuple,
-    TextIO,
-    Union,
-)
-from copy import deepcopy
-from datetime import datetime
-import configparser
-import click
-import os
-
-o: Optional[TextIO] = None
-debug: Optional[bool] = False
-log_dir: str = "logs/"
+from cardstock import *
 
 
-def p(msg):
-    global o
-    click.echo(msg, o)
-
-
-def px(msg) -> None:
-    global debug
-    if debug:
-        p(msg)
-
-
-class Color:
-    WHITE = (0, "FFF")
-    BLACK = (1, "000")
-    RED = (2, "F00")
-    YES = (99, "")
-
-    def __init__(self, value: int, hexa: str):
-        self.v = value
-        self.hex = hexa
-
-    def __hash__(self) -> int:
-        return self.v
-
-
-@unique
-class Suit(Enum):
-    JOKER = (0, "🃏", "JOKER", Color.WHITE)
-    CLUB = (1, "♣", "SPADE", Color.BLACK)
-    DIAMOND = (2, "♢", "HEART", Color.RED)
-    SPADE = (3, "♠", "CLUB", Color.BLACK)
-    HEART = (4, "♡", "DIAMOND", Color.RED)
-    TRUMP = (5, "T", "TRUMP", Color.YES)
-
-    opposite: "Suit"
-    v: int
-
-    def __init__(self, value: int, symbol: str, opposite: str, color: Color):
-        self.v = value
-        self.symbol = symbol
-        self.color = color
-        try:
-            self.opposite = self._member_map_[opposite]
-            self._member_map_[opposite].opposite = self
-        except KeyError:
-            pass
-
-    @property
-    def plural_name(self) -> str:
-        if self != self.TRUMP:
-            return self.name + "S"
-        return self.name
-
-    def __str__(self):
-        return self.plural_name
-
-    def __repr__(self):
-        return self.symbol
-
-    def __lt__(self, other):
-        return self.v < other.v
-
-
-@unique
-class Rank(Enum):
-    JOKER = (0, "🃟")
-    ACE_LO = (1, "a")
-    TWO = (2, "2")
-    THREE = (3, "3")
-    FOUR = (4, "4")
-    FIVE = (5, "5")
-    SIX = (6, "6")
-    SEVEN = (7, "7")
-    EIGHT = (8, "8")
-    NINE = (9, "9")
-    TEN = (10, "⒑")
-    JACK = (11, "J")
-    QUEEN = (12, "Q")
-    KING = (13, "K")
-    ACE_HI = (14, "A")
-    LEFT_BOWER = (15, "L")
-    RIGHT_BOWER = (16, "R")
-
-    def __init__(self, value: int, char: str):
-        self.v = value
-        self.char = char
-
-    @property
-    def long_display_name(self) -> str:
-        if self == self.ACE_HI:
-            return "ACE"
-        if self == self.ACE_LO:
-            return "ACE"
-        return self.name
-
-    def __repr__(self):
-        return self.char
-
-    def __str__(self):
-        return self.long_display_name
-
-    def __lt__(self, other):
-        return self.v < other.v
-
-
-class Card:
-    def __init__(self, rank, suit):
-        self.rank = rank
-        self.suit = suit
-        self.d_rank = rank
-        self.d_suit = suit
-
-    @property
-    def card_name(self) -> str:
-        return self.rank.long_display_name + " of " + self.suit.plural_name
-
-    def __str__(self) -> str:
-        return self.card_name
-
-    def __repr__(self):
-        return f"{repr(self.d_rank)}{repr(self.d_suit)}"
-        # return f"{repr(self.rank)}{repr(self.suit)}"  # debugging
-
-    def __eq__(self, other):
-        return True if (self.rank == other.rank and self.suit == other.suit) else False
-
-    def __lt__(self, other):
-        if self.suit < other.suit:
-            return True
-        if self.suit > other.suit:
-            return False
-        if self.rank < other.rank:
-            return True
-        return False
-
-    def __hash__(self) -> int:
-        return key_trump_power(self)
-
-    def beats(self, other: "Card", is_low: bool) -> bool:
-        """Assumes the first played card of equal value wins"""
-        if self.suit not in {other.suit, Suit.TRUMP}:
-            return False  # must follow suit
-        return (self < other) if is_low else (self > other)
-
-    def follows_suit(self, s: Suit, strict: bool = True) -> bool:
-        return self.suit == s or self.suit == Suit.TRUMP and not strict
-
-
-def key_display4human(c: Card) -> int:
-    return (
-        c.d_suit.opposite.v * 100 + 15
-        if c.rank == Rank.LEFT_BOWER
-        else c.d_suit.v * 100 + c.rank.v
-    )
-
-
-suits: List[Suit] = [Suit.HEART, Suit.SPADE, Suit.DIAMOND, Suit.CLUB]
-euchre_ranks: List[Rank] = [
-    Rank.NINE,
-    Rank.TEN,
-    Rank.JACK,
-    Rank.QUEEN,
-    Rank.KING,
-    Rank.ACE_HI,
-]
-poker_ranks: List[Rank] = [
-    Rank.TWO,
-    Rank.THREE,
-    Rank.FOUR,
-    Rank.FIVE,
-    Rank.SIX,
-    Rank.SEVEN,
-    Rank.EIGHT,
-] + euchre_ranks
-
-
-class Hand(List[Card]):
-    def __str__(self) -> str:
-        return "  ".join([repr(x) for x in self])
-
-    def __add__(self, other) -> "Hand":
-        return Hand(list(self) + list(other))
-
-    def trumpify(self, trump_suit: Optional[Suit]) -> "Hand":
-        if not trump_suit:
-            return self
-        for card in self:
-            if card.suit == trump_suit:
-                card.suit = Suit.TRUMP
-                if card.rank == Rank.JACK:
-                    card.rank = Rank.RIGHT_BOWER
-            if card.rank == Rank.JACK and card.suit == trump_suit.opposite:
-                card.suit = Suit.TRUMP
-                card.rank = Rank.LEFT_BOWER
-        return self
-
-
-def make_deck(r: List[Rank], s: List[Suit]) -> Hand:
-    return Hand(Card(rank, suit) for rank in r for suit in s)
-
-
-def make_euchre_deck() -> Hand:
-    """Single euchre deck"""
-    return make_deck(euchre_ranks, suits)
-
-
-def make_pinochle_deck() -> Hand:
-    """a.k.a. a double euchre deck"""
-    return make_euchre_deck() + make_euchre_deck()
-
-
-def make_standard_deck() -> Hand:
-    """
-    Standard 52 card deck
-    Perfect for 52 pick-up
-    """
-    return make_deck(poker_ranks, suits)
-
-
-@unique
-class Bid(Enum):
-    LOW_NO = (None, True)
-    CLUBS = (Suit.CLUB, False)
-    DIAMONDS = (Suit.DIAMOND, False)
-    SPADES = (Suit.SPADE, False)
-    HEARTS = (Suit.HEART, False)
-    HI_NO = (None, False)
-
-    def __init__(self, s: Optional[Suit], lo: bool):
-        self.trump_suit: Optional[Suit] = s
-        self.is_low: bool = lo
-
-
-class Player:
-    team: "Team"
-    next_player: "Player"
+class Player(TeamPlayer):
     desired_trump: Bid
     shoot_strength: int
 
     def __init__(self, name: str, bot: int = 1):
-        self.name: str = name
-        self.is_bot: int = bot
+        super().__init__(name, bot)
         self.tricks: int = 0
-        self.hand: Hand = Hand()
         self.bid_estimates: Dict[Bid, int] = {}
         self.reset_bids()
         self.card_count: Dict[Card, int] = {}
@@ -298,12 +37,6 @@ class Player:
     def reset_bids(self) -> None:
         for t in Bid:
             self.bid_estimates[t] = 0
-
-    def __str__(self):
-        return f"{self.name}"
-
-    def __repr__(self):
-        return f"Player {self.name}"
 
     def choose_trump(self) -> Bid:
         if not self.is_bot:
@@ -440,6 +173,16 @@ class Player:
                 self.hand.remove(
                     pick_card_human(self.hand, self.hand, None, p_word="discard")
                 )
+
+
+class HumanPlayer(Player):
+    def __init__(self, name):
+        super().__init__(name, 0)
+
+
+class ComputerPlayer(Player):
+    def __init__(self, name):
+        super().__init__(name, 1)
 
 
 def simulate_hand(*, h_p: Hand, d_p: Hand, t: Bid, **kwargs) -> int:
@@ -592,62 +335,17 @@ def pick_card_advance(valid_cards: Hand, **kwargs,) -> Card:
     return random.choice(junk_cards)
 
 
-def match_by_rank(c: Iterable[Card], r: Rank) -> List[Card]:
-    return [x for x in c if (x.rank == r)]
-
-
-def key_rank_first(c: Card) -> int:
-    return c.rank.v * 10 + c.suit.v
-
-
-def key_suit_first(c: Card) -> int:
-    return c.suit.v * 100 + c.rank.v
-
-
-def key_trump_power(c: Card) -> int:
-    return key_rank_first(c) + (1000 if c.suit == Suit.TRUMP else 0)
-
-
-class TrickPlay(NamedTuple):
-    card: Card
-    played_by: Player
-
-    def beats(self, other: "TrickPlay", is_low: bool = False):
-        return self.card.beats(other.card, is_low)
-
-
-class Trick(List[TrickPlay]):
-    def winner(self, is_low: bool) -> Optional[TrickPlay]:
-        if not self:
-            return None
-        w: TrickPlay = self[0]
-        for cpt in self:
-            if cpt.beats(w, is_low):
-                w = cpt
-        return w
-
-
-class Team:
-    bid: int = 0
-
-    def __init__(self, players: List[Player]):
+class Team(BaseTeam, MakesBid, WithScore):
+    def __init__(self, players: Iterable[TeamPlayer]):
+        super().__init__()
         for player in players:
             player.team = self
         self.players: Set[Player] = set(players)
         self.bid_history: List[str] = []
         self.tricks_taken: List[int] = []
-        self.score_changes: List[int] = []
 
     def __repr__(self):
         return "/".join([pl.name for pl in self.players])
-
-    @property
-    def score(self):
-        return sum(self.score_changes)
-
-    @score.setter
-    def score(self, value: int):
-        self.score_changes.append(value)
 
     def hand_tab(self, hand: Optional[int], tab: str = "\t") -> str:
         return tab.join(
@@ -686,7 +384,7 @@ def reset_unplayed(
     return up
 
 
-class Game:
+class Game(BaseGame):
     def __init__(
         self,
         players: List[Player],
@@ -695,6 +393,7 @@ class Game:
         threshold: Optional[int],
         start: str = str(datetime.now()).split(".")[0],
     ):
+        super().__init__()
         self.trump: Optional[Suit] = None
         self.low_win: bool = False
         self.discard_pile: Hand = Hand()
@@ -742,14 +441,12 @@ class Game:
 
         # deal the cards
         idx: int = 0
-        for player in po:
-            player.hand = Hand(deck[idx : idx + self.hand_size])
-            player.tricks = 0
-            player.card_count = reset_unplayed(
-                player.hand, deck_type=self.deck_generator
-            )
+        for pl in po:
+            pl.hand = Hand(deck[idx : idx + self.hand_size])
+            pl.tricks = 0
+            pl.card_count = reset_unplayed(pl.hand, deck_type=self.deck_generator)
             idx += self.hand_size
-            player.reset_bids()
+            pl.reset_bids()
 
         # bidding
         lead: Player = bidding(po, self.valid_bids)
@@ -979,8 +676,11 @@ def main(
     teams: int = handedness % 10
     ppt: int = hands // teams
     start_time: str = str(datetime.now()).split(".")[0]
-    global o
-    global debug
+    # the following three lines modify globals from cardstock.py
+    global o  # noqa
+    global debug  # noqa
+    global log_dir  # noqa
+    log_dir = game_out_dir()
     if not humans:  # assume one human player as default
         humans = [random.randrange(hands)]
     Path(log_dir).mkdir(parents=True, exist_ok=True)
@@ -996,22 +696,13 @@ def main(
     }[hands]
     if len(humans) == 1 and humans[0] < hands:
         player_handles[humans[0]] = "Human"
-    plist: List[Player] = make_players(player_handles)
-    for h in humans:
-        if h < hands:
-            plist[h].is_bot = 0
+    plist: List[Player] = make_players(player_handles, Player)
     # set up teams
-    [Team([plist[i + j * teams] for j in range(ppt)]) for i in range(teams)]
+    [Team(plist[i::ppt]) for i in range(teams)]
     g: Game = Game(plist, make_pinochle_deck, threshold=points, start=start_time)
     g.play()
     g.write_log()
     return g
-
-
-def make_players(handles: List[str]) -> List[Player]:
-    c = configparser.ConfigParser()
-    c.read("players.cfg")
-    return [Player(c[h]["name"], int(c[h]["is_bot"])) for h in handles]
 
 
 def bidding(bid_order: List[Player], valid_bids: List[int]) -> Player:
@@ -1060,23 +751,6 @@ def bidding(bid_order: List[Player], valid_bids: List[int]) -> Player:
 
     wp.team.bid = wb
     return wp
-
-
-def follow_suit(
-    s: Optional[Suit], cs: Iterable[Card], strict: Optional[bool] = True
-) -> Hand:
-    # strict filtering
-    if not s:
-        return cs if isinstance(cs, Hand) else Hand(cs)
-    if strict is not None:
-        return Hand(c for c in cs if (c.follows_suit(s, strict)))
-
-    # strict is None gives cards that follow suit
-    if valid_cards := follow_suit(s, cs, True):
-        return valid_cards
-    # if valid_cards := follow_suit(s, cs, False):
-    #     return valid_cards
-    return follow_suit(None, cs, None)
 
 
 if __name__ == "__main__":
