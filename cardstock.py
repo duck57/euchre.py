@@ -35,14 +35,16 @@ import os
 import click
 import abc
 
-
-o: Optional[TextIO] = None
-debug: Optional[bool] = False
-log_dir: str = "logs/"
+base_log_dir: str = "logs/"
 
 
-def game_out_dir() -> str:
-    return os.path.join(log_dir, os.path.basename(__file__).split(".py")[0])
+def game_out_dir(gamename: Union[str, bytes]) -> str:
+    return os.path.join(base_log_dir, gamename)
+
+
+@abc.abstractmethod
+def get_game_name() -> bytes:
+    return os.path.basename(__file__).split(".py")[0]
 
 
 def make_players(
@@ -57,17 +59,6 @@ def make_players(
     return [
         pt(c[h]["name"], int(c[h]["is_bot"])) for pt, h in zip(player_type, handles)
     ]
-
-
-def p(msg):
-    global o
-    click.echo(msg, o)
-
-
-def px(msg) -> None:
-    global debug
-    if debug:
-        p(msg)
 
 
 class Color:

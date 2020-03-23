@@ -22,6 +22,21 @@ Mothjab is a funny word with no current meaning.
 
 from cardstock import *
 
+debug: Optional[bool] = False
+o: Optional[TextIO] = None
+log_dir: str = game_out_dir(os.path.basename(__file__).split(".py")[0])
+
+
+def p(msg):
+    global o
+    click.echo(msg, o)
+
+
+def px(msg) -> None:
+    global debug
+    if debug:
+        p(msg)
+
 
 class Player(TeamPlayer):
     desired_trump: Bid
@@ -676,11 +691,10 @@ def main(
     teams: int = handedness % 10
     ppt: int = hands // teams
     start_time: str = str(datetime.now()).split(".")[0]
-    # the following three lines modify globals from cardstock.py
     global o  # noqa
     global debug  # noqa
     global log_dir  # noqa
-    log_dir = game_out_dir()
+    log_dir = game_out_dir("euchre")
     if not humans:  # assume one human player as default
         humans = [random.randrange(hands)]
     Path(log_dir).mkdir(parents=True, exist_ok=True)
