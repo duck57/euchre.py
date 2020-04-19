@@ -38,7 +38,7 @@ def px(msg) -> None:
         p(msg)
 
 
-class Player(TeamPlayer):
+class Player(TeamPlayer, abc.ABC):
     desired_trump: Bid
     shoot_strength: int
 
@@ -53,17 +53,11 @@ class Player(TeamPlayer):
         for t in Bid:
             self.bid_estimates[t] = 0
 
+    @property
     def choose_trump(self) -> Bid:
-        if not self.is_bot:
-            p(self.hand)  # give a closer look at your hand before bidding
-            self.desired_trump = Bid[
-                click.prompt(
-                    "Declare Trump",
-                    type=click.Choice([c for c in Bid.__members__], False),
-                ).upper()
-            ]
         return self.desired_trump
 
+    @abc.abstractmethod
     def make_bid(
         self,
         valid_bids: List[int],
@@ -72,49 +66,7 @@ class Player(TeamPlayer):
         min_bid: int = 0,
         leading_player: "Optional[Player]" = None,
     ) -> int:
-        if self.is_bot and max(self.bid_estimates.values()) == 0:
-            # simulate a hand for the bots
-            for card in self.hand:
-                d.remove(card)
-            self.bid_estimates = {
-                t: simulate_hand(
-                    h_p=deepcopy(self.hand), d_p=deepcopy(d), handedness=handedness, t=t
-                )
-                for t in Bid
-            }
-        elif not self.is_bot:
-            # show hand for the humans
-            self.hand.sort(key=key_display4human)
-            p(self.hand)
-        if self.is_bot:
-            # pick the biggest
-            # any decisions based on the current winning bid should happen here
-            bid: int = max(self.bid_estimates.values())
-            self.desired_trump = random.choice(
-                [k for k in self.bid_estimates.keys() if (self.bid_estimates[k] == bid)]
-            )
-            # don't outbid your partner (within reason)
-            if leading_player in self.teammates and bid - min_bid < 2:
-                return 0
-            # can you do it by yourself?
-            if bid == len(self.hand) - 1:
-                return valid_bids[-2]  # call a shooter
-            elif bid == len(self.hand):
-                return valid_bids[-1]  # call a loner
-            # don't bid outrageously if you don't have to
-            if bid in range(min_bid, min_bid + self.shoot_strength + 2):
-                return bid
-            # count on two tricks from your partner
-            return bid + self.shoot_strength * len(self.teammates)
-        else:
-            return int(
-                click.prompt(
-                    "How much to bid",
-                    type=click.Choice(
-                        ["0"] + [str(x) for x in valid_bids if (x >= min_bid)], False,
-                    ),
-                )
-            )
+        pass
 
     def trumpify_hand(self, trump_suit: Optional[Suit], is_lo: bool = False) -> None:
         """Marks the trump suit and sort the hands"""
@@ -124,21 +76,24 @@ class Player(TeamPlayer):
             reverse=is_lo
             if self.is_bot
             else False,  # bots have [-1] as the "best" card
-            key=self.choose_sort_key(trump_suit),
+            key=self.choose_sort_key,
         )
         self.card_count = reset_unplayed(self.hand, ts=trump_suit)
 
-    def choose_sort_key(self, trump: Optional[Suit] = None) -> Callable:
-        if not self.is_bot:
-            return key_display4human
-        return key_trump_power
+    @property
+    def choose_sort_key(self) -> Callable:
+        return key_display4human if not self.is_bot else key_trump_power
+
+    @abc.abstractmethod
+    def pick_card(
+        self, valid_cards: Hand, **kwargs,
+    ):
+        pass
 
     def play_card(self, trick_in_progress: "Trick", /, **kwargs,) -> Card:
         for x in trick_in_progress:
             self.card_count[x.card] -= 1
-        c: Card = {0: pick_card_human, 1: pick_card_simple, 2: pick_card_advance}[
-            self.is_bot
-        ](
+        c: Card = self.pick_card(
             follow_suit(  # valid cards
                 trick_in_progress[0].card.suit if trick_in_progress else None,
                 self.hand,
@@ -165,10 +120,7 @@ class Player(TeamPlayer):
         if self.is_bot:
             return self.hand[-cards:]
         # human
-        return [
-            pick_card_human(self.hand, self.hand, None, p_word="send")
-            for _ in range(cards)
-        ]
+        return [self.pick_card(self.hand, p_word="send") for _ in range(cards)]
 
     def receive_shooter(self, handedness: int, bid: Bid) -> None:
         for pl in self.teammates:
@@ -176,28 +128,169 @@ class Player(TeamPlayer):
         self.hand.sort(
             key=self.choose_sort_key(), reverse=bid.is_low if self.is_bot else False
         )
-        if isinstance(self.hand[-1], Card):
-            return  # keep old rules without deleting code
-        # discard extra cards
-        for _ in range(len(self.teammates) * self.shoot_strength):
-            if self.is_bot:
-                self.hand.remove(
-                    pick_card_advance(self.hand, is_low=not bid.is_low, pl=self)
-                )
-            else:
-                self.hand.remove(
-                    pick_card_human(self.hand, self.hand, None, p_word="discard")
-                )
 
 
 class HumanPlayer(Player):
     def __init__(self, name):
         super().__init__(name, 0)
 
+    def choose_trump(self) -> Bid:
+        p(self.hand)  # give a closer look at your hand before bidding
+        return Bid[
+            click.prompt(
+                "Declare Trump", type=click.Choice([c for c in Bid.__members__], False),
+            ).upper()
+        ]
+
+    def make_bid(
+        self,
+        valid_bids: List[int],
+        d: Hand,
+        handedness: int,
+        min_bid: int = 0,
+        leading_player: "Optional[Player]" = None,
+    ) -> int:
+        self.hand.sort(key=key_display4human)
+        p(self.hand)
+        return int(
+            click.prompt(
+                "How much to bid",
+                type=click.Choice(
+                    ["0"] + [str(x) for x in valid_bids if (x >= min_bid)], False,
+                ),
+            )
+        )
+
+    def pick_card(
+        self, valid_cards: Hand, **kwargs,
+    ):
+        trick_in_progress = kwargs.get("trick_in_progress")
+        if trick_in_progress is not None:
+            p(trick_in_progress if trick_in_progress else "Choose the lead.")
+        proper_picks: List[int] = [
+            i for i in range(len(self.hand)) if self.hand[i] in valid_cards
+        ]
+        p("  ".join([repr(c) for c in self.hand]))
+        p(
+            "  ".join(
+                [f"{j:2}" if j in proper_picks else "  " for j in range(len(self.hand))]
+            )
+        )
+        return self.hand[
+            int(
+                click.prompt(
+                    f"Index of card to {kwargs.get('p_word', 'play')}",
+                    type=click.Choice([str(pp) for pp in proper_picks], False),
+                    show_choices=False,
+                    default=proper_picks[0] if len(proper_picks) == 1 else None,
+                )
+            )
+        ]
+
 
 class ComputerPlayer(Player):
     def __init__(self, name):
         super().__init__(name, 1)
+
+    def make_bid(
+        self,
+        valid_bids: List[int],
+        d: Hand,
+        handedness: int,
+        min_bid: int = 0,
+        leading_player: "Optional[Player]" = None,
+    ) -> int:
+        if max(self.bid_estimates.values()) == 0:
+            # simulate a hand
+            for card in self.hand:
+                d.remove(card)
+            self.bid_estimates = {
+                t: simulate_hand(
+                    h_p=deepcopy(self.hand), d_p=deepcopy(d), handedness=handedness, t=t
+                )
+                for t in Bid
+            }
+        # pick the biggest
+        # any decisions based on the current winning bid should happen here
+        bid: int = max(self.bid_estimates.values())
+        self.desired_trump = random.choice(
+            [k for k in self.bid_estimates.keys() if (self.bid_estimates[k] == bid)]
+        )
+        # don't outbid your partner (within reason)
+        if leading_player in self.teammates and bid - min_bid < 2:
+            return 0
+        # can you do it by yourself?
+        if bid == len(self.hand) - 1:
+            return valid_bids[-2]  # call a shooter
+        elif bid == len(self.hand):
+            return valid_bids[-1]  # call a loner
+        # don't bid outrageously if you don't have to
+        if bid in range(min_bid, min_bid + self.shoot_strength + 2):
+            return bid
+        # count on two tricks from your partner
+        return bid + self.shoot_strength * len(self.teammates)
+
+    def pick_card(self, valid_cards: Hand, **kwargs,) -> Card:
+        tp: Trick = kwargs.get("trick_in_progress")
+        is_low: bool = kwargs.get("is_low")
+        handedness: int = kwargs.get("handedness")
+        discard: Hand = kwargs.get("discard")
+        unplayed: Hand = kwargs.get("unplayed", Hand())
+        broken: Dict[Suit, Union[Team, None, bool]] = kwargs.get("broken_suits")
+        trump: Optional[Suit] = kwargs.get("trump")
+
+        def winning_leads(ss: List[Suit], st: bool = True) -> List[Card]:
+            wl: List[Card] = []
+            for s in ss:
+                wl.extend(
+                    estimate_tricks_by_suit(
+                        follow_suit(s, valid_cards, True),
+                        follow_suit(s, unplayed, True),
+                        is_low,
+                        strict=st,
+                    )
+                )
+            return wl
+
+        if not tp:  # you have the lead
+            safer_suits: List[Suit] = [
+                s for s in broken.keys() if broken[s] is False or broken[s] == self.team
+            ] if broken else suits
+            w: List[Card] = []
+            if safer_suits:  # unbroken suits to lead aces
+                px("Checking suits")
+                w += winning_leads(safer_suits)
+            else:  # lead with good trump
+                px("Leading with a good trump")
+                w += winning_leads([Suit.TRUMP])
+            if not w:  # try a risky ace
+                px("Risky bet")
+                w += winning_leads(suits, st=bool(self.teammates))
+            if not w and self.teammates:  # seamless passing of the lead
+                is_low = not is_low
+                w += winning_leads(suits + [Suit.TRUMP], st=False)
+                px("Lead pass")
+            if not w:  # YOLO time
+                px("YOLO")
+                return random.choice(valid_cards)
+            px(w)
+            return random.choice(w)
+        # you don't have the lead
+        # win if you can (and the current lead isn't on your team)
+        # play garbage otherwise
+        junk_ranks: Set[Rank] = (
+            {Rank.ACE_HI, Rank.KING} if is_low else {Rank.NINE, Rank.TEN, Rank.JACK}
+        ) | {Rank.QUEEN}
+        wc, wp = tp.winner(is_low)
+        w = Hand(c for c in valid_cards if c.beats(wc, is_low))
+        junk_cards = Hand(h for h in valid_cards if h not in w)
+        if w:  # you have something that can win
+            if wp in self.teammates and junk_cards:  # your partner is winning
+                if wc.rank in junk_ranks:  # but their card is rubbish
+                    return random.choice(w)
+                return random.choice(junk_cards)
+            return random.choice(w)
+        return random.choice(junk_cards)
 
 
 def simulate_hand(*, h_p: Hand, d_p: Hand, t: Bid, **kwargs) -> int:
@@ -253,101 +346,6 @@ def estimate_tricks_by_suit(
         if oth and (strict or not me and not strict):
             break  # there are mystery cards that beat your cards
     return est
-
-
-def pick_card_human(
-    valid_cards: Hand, full_hand: Hand, trick_in_progress: "Optional[Trick]", **kwargs
-) -> Card:
-    if trick_in_progress is not None:
-        p(trick_in_progress if trick_in_progress else "Choose the lead.")
-    proper_picks: List[int] = [
-        i for i in range(len(full_hand)) if full_hand[i] in valid_cards
-    ]
-    p("  ".join([repr(c) for c in full_hand]))
-    p(
-        "  ".join(
-            [f"{j:2}" if j in proper_picks else "  " for j in range(len(full_hand))]
-        )
-    )
-    return full_hand[
-        int(
-            click.prompt(
-                f"Index of card to {kwargs.get('p_word', 'play')}",
-                type=click.Choice([str(pp) for pp in proper_picks], False),
-                show_choices=False,
-                default=proper_picks[0] if len(proper_picks) == 1 else None,
-            )
-        )
-    ]
-
-
-def pick_card_simple(valid_cards: Hand, **kwargs,) -> Card:
-    return pick_card_advance(valid_cards, **kwargs)
-
-
-def pick_card_advance(valid_cards: Hand, **kwargs,) -> Card:
-    pl: Player = kwargs.get("pl")
-    my_hand: Hand = pl.hand
-    tp: Trick = kwargs.get("trick_in_progress")
-    is_low: bool = kwargs.get("is_low")
-    handedness: int = kwargs.get("handedness")
-    discard: Hand = kwargs.get("discard")
-    unplayed: Hand = kwargs.get("unplayed", Hand())
-    broken: Dict[Suit, Union[Team, None, bool]] = kwargs.get("broken_suits")
-    trump: Optional[Suit] = kwargs.get("trump")
-
-    def winning_leads(ss: List[Suit], st: bool = True) -> List[Card]:
-        wl: List[Card] = []
-        for s in ss:
-            wl.extend(
-                estimate_tricks_by_suit(
-                    follow_suit(s, valid_cards, True),
-                    follow_suit(s, unplayed, True),
-                    is_low,
-                    strict=st,
-                )
-            )
-        return wl
-
-    if not tp:  # you have the lead
-        safer_suits: List[Suit] = [
-            s for s in broken.keys() if broken[s] is False or broken[s] == pl.team
-        ] if broken else suits
-        w: List[Card] = []
-        if safer_suits:  # unbroken suits to lead aces
-            px("Checking suits")
-            w += winning_leads(safer_suits)
-        else:  # lead with good trump
-            px("Leading with a good trump")
-            w += winning_leads([Suit.TRUMP])
-        if not w:  # try a risky ace
-            px("Risky bet")
-            w += winning_leads(suits, st=bool(pl.teammates))
-        if not w and pl.teammates:  # seamless passing of the lead
-            is_low = not is_low
-            w += winning_leads(suits + [Suit.TRUMP], st=False)
-            px("Lead pass")
-        if not w:  # YOLO time
-            px("YOLO")
-            return random.choice(valid_cards)
-        px(w)
-        return random.choice(w)
-    # you don't have the lead
-    # win if you can (and the current lead isn't on your team)
-    # play garbage otherwise
-    junk_ranks: Set[Rank] = (
-        {Rank.ACE_HI, Rank.KING} if is_low else {Rank.NINE, Rank.TEN, Rank.JACK}
-    ) | {Rank.QUEEN}
-    wc, wp = tp.winner(is_low)
-    w = Hand(c for c in valid_cards if c.beats(wc, is_low))
-    junk_cards = Hand(h for h in valid_cards if h not in w)
-    if w:  # you have something that can win
-        if wp in pl.teammates and junk_cards:  # your partner is winning
-            if wc.rank in junk_ranks:  # but their card is rubbish
-                return random.choice(w)
-            return random.choice(junk_cards)
-        return random.choice(w)
-    return random.choice(junk_cards)
 
 
 class Team(BaseTeam, MakesBid, WithScore):
@@ -467,7 +465,7 @@ class Game(BaseGame):
         lead: Player = bidding(po, self.valid_bids)
 
         # declare Trump
-        trump: Bid = lead.choose_trump()
+        trump: Bid = lead.choose_trump
         p(f"{lead} bid {lead.team.bid} {trump.name}\n")
 
         # modify hands if trump called
@@ -691,13 +689,11 @@ def main(
     teams: int = handedness % 10
     ppt: int = hands // teams
     start_time: str = str(datetime.now()).split(".")[0]
-    global o  # noqa
-    global debug  # noqa
-    global log_dir  # noqa
-    log_dir = game_out_dir("euchre")
+    global o
+    global debug
+    global log_dir
     if not humans:  # assume one human player as default
         humans = [random.randrange(hands)]
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
     if all_bots:
         humans = []
         o = open(os.path.join(log_dir, f"{start_time}.gameplay"), "w")
@@ -710,7 +706,13 @@ def main(
     }[hands]
     if len(humans) == 1 and humans[0] < hands:
         player_handles[humans[0]] = "Human"
-    plist: List[Player] = make_players(player_handles, Player)
+    p_types: List[Type[Player]] = [ComputerPlayer for _ in range(handedness)]
+    for n in humans:
+        if n < len(p_types):
+            p_types[n] = HumanPlayer
+    plist: List[Player] = make_players(
+        player_handles, p_types,
+    )
     # set up teams
     [Team(plist[i::ppt]) for i in range(teams)]
     g: Game = Game(plist, make_pinochle_deck, threshold=points, start=start_time)
@@ -768,4 +770,5 @@ def bidding(bid_order: List[Player], valid_bids: List[int]) -> Player:
 
 
 if __name__ == "__main__":
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
     main()

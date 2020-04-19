@@ -43,7 +43,7 @@ def game_out_dir(gamename: Union[str, bytes]) -> str:
 
 
 @abc.abstractmethod
-def get_game_name() -> bytes:
+def get_game_name() -> str:
     return os.path.basename(__file__).split(".py")[0]
 
 
@@ -56,9 +56,7 @@ def make_players(
     if not isinstance(player_type, Iterable):
         player_type = {player_type}
     player_type = cycle(player_type)
-    return [
-        pt(c[h]["name"], int(c[h]["is_bot"])) for pt, h in zip(player_type, handles)
-    ]
+    return [pt(c[h]["name"]) for pt, h in zip(player_type, handles)]
 
 
 class Color:
@@ -409,6 +407,10 @@ class TeamPlayer(BasePlayer, abc.ABC):
 class BaseGame(abc.ABC):
     @abc.abstractmethod
     def play(self):
+        pass
+
+    @abc.abstractmethod
+    def victory_check(self) -> Tuple[int, Union[BaseTeam, BasePlayer, None]]:
         pass
 
 
