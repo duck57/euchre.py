@@ -394,7 +394,10 @@ PlayerType = TypeVar("PlayerType", bound=BasePlayer)
 
 
 class BaseTeam:
-    pass
+    def __init__(self, players: "Iterable[TeamPlayer]"):
+        for player in players:
+            player.team = self
+        self.players: Set[TeamPlayer] = set(players)
 
 
 TeamType = TypeVar("TeamType", bound=BaseTeam)
