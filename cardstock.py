@@ -8,7 +8,6 @@ Shared objects and functions for many card games, especially those
 where you take tricks
 """
 
-
 from enum import Enum, unique
 from itertools import cycle
 import random
@@ -34,6 +33,7 @@ import configparser
 import os
 import click
 import abc
+import inspect
 
 base_log_dir: str = "logs/"
 
@@ -50,13 +50,14 @@ def get_game_name() -> str:
 def make_players(
     handles: List[str],
     player_type: "Union[Iterable[Type[PlayerType]], Type[PlayerType]]",
+    deck: "Hand",
 ) -> "List[PlayerType]":
     c = configparser.ConfigParser()
     c.read("players.cfg")
     if not isinstance(player_type, Iterable):
         player_type = {player_type}
     player_type = cycle(player_type)
-    return [pt(c[h]["name"]) for pt, h in zip(player_type, handles)]
+    return [pt(h, deck) for pt, h in zip(player_type, handles)]
 
 
 class Color:
@@ -130,6 +131,7 @@ class Rank(Enum):
     ACE_HI = (14, "A")
     LEFT_BOWER = (15, "L")
     RIGHT_BOWER = (16, "R")
+    SUPER_JOKER = (17, "*")
 
     def __init__(self, value: int, char: str):
         self.v = value
@@ -199,6 +201,10 @@ class Cardstock:
     def follows_suit(self, s: Suit, strict: bool = True) -> bool:
         return self.suit == s or self.suit == Suit.TRUMP and not strict
 
+    @property
+    def value(self) -> int:
+        return 1
+
 
 class Card(Cardstock):
     pass
@@ -248,6 +254,17 @@ class Trick(List[TrickPlay]):
             if cpt.beats(w, is_low):
                 w = cpt
         return w
+
+    @property
+    def points(self) -> int:
+        return 1
+
+    @property
+    def cards(self) -> "Hand":
+        return Hand(c.card for c in self)
+
+
+TrickType = TypeVar("TrickType", bound=Trick)
 
 
 suits: List[Suit] = [Suit.HEART, Suit.SPADE, Suit.DIAMOND, Suit.CLUB]
@@ -301,26 +318,26 @@ class Hand(List[CardType]):
         return self
 
 
-def make_deck(r: List[Rank], s: List[Suit]) -> Hand:
-    return Hand(Card(rank, suit) for rank in r for suit in s)
+def make_deck(r: List[Rank], s: List[Suit], c: Type[Cardstock] = Card) -> Hand:
+    return Hand(c(rank, suit) for rank in r for suit in s)
 
 
-def make_euchre_deck() -> Hand:
+def make_euchre_deck(c: Type[Cardstock] = Card) -> Hand:
     """Single euchre deck"""
-    return make_deck(euchre_ranks, suits)
+    return make_deck(euchre_ranks, suits, c)
 
 
-def make_pinochle_deck() -> Hand:
+def make_pinochle_deck(c: Type[Cardstock] = Card) -> Hand:
     """a.k.a. a double euchre deck"""
-    return make_euchre_deck() * 2
+    return make_euchre_deck(c) * 2
 
 
-def make_standard_deck() -> Hand:
+def make_standard_deck(c: Type[Cardstock] = Card) -> Hand:
     """
     Standard 52 card deck
     Perfect for 52 pick-up
     """
-    return make_deck(poker_ranks, suits)
+    return make_deck(poker_ranks, suits, c)
 
 
 def follow_suit(
@@ -373,11 +390,18 @@ class MakesBid:
 
 class BasePlayer(abc.ABC):
     next_player: "PlayerType"
+    team: "TeamType"
+    previous_player: "PlayerType"
+    opposite_player: "Optional[PlayerType]" = None
 
-    def __init__(self, name: str, bot: int = 1):
+    def __init__(self, name: str, bot: int = 1, deck: Optional[Hand] = None):
         self.name: str = name
         self.is_bot: int = bot
         self.hand: Hand = Hand()
+        self.deck: Hand = deepcopy(deck)
+        self.card_count: Hand = deepcopy(deck)
+        self.tricks_taken: List[Trick] = []
+        self.sort_key: Callable[[CardType], int] = key_display4human
 
     def __str__(self):
         return f"{self.name}"
@@ -386,35 +410,241 @@ class BasePlayer(abc.ABC):
         return f"Player {self.name}"
 
     @abc.abstractmethod
-    def play_card(self, *args, **kwargs) -> CardType:
-        return self.hand.pop(-1)
+    def pick_card(
+        self, valid_cards: Hand, **kwargs,
+    ):
+        pass
+
+    def play_card(self, trick_in_progress: "Trick", /, **kwargs,) -> CardType:
+        for x in trick_in_progress:
+            self.card_count.remove(x.card)
+        return self.pick_card(
+            follow_suit(  # valid cards
+                trick_in_progress[0].card.suit if trick_in_progress else None,
+                self.hand,
+                strict=None,
+            ),
+            full_hand=self.hand,  # your hand
+            trick_in_progress=trick_in_progress,  # current trick
+            pl=self,
+            unplayed=self.card_count,
+            **kwargs,  # any other useful info
+        )
+
+    @property
+    def teammates(self) -> "Set[PlayerType]":
+        return self.team.players - {self}
+
+    def send_shooter(self, cards: int, p_word: str = "send") -> List[Card]:
+        if not cards:
+            return []
+        out = (
+            self.hand[-cards:]
+            if self.is_bot
+            else [
+                self.pick_card(
+                    self.hand, p_word=p_word, prompt="Send a card to your friend."
+                )
+                for _ in range(cards)
+            ]
+        )
+        self.card_count += out
+        return out
+
+    def sort_hand(self, is_low: bool = False) -> None:
+        """
+        Sorts your current hand
+        bots have [-1] as the "best" card
+        """
+        self.hand.sort(key=self.sort_key, reverse=is_low if self.is_bot else False)
+
+    def receive_cards(self, cards_in: Iterable[CardType]) -> None:
+        self.hand += cards_in
+        self.sort_hand()
+        for c in cards_in:
+            self.card_count.remove(c)
+
+    def reset_unplayed(self, ts: Optional[Suit] = None,) -> Hand:
+        dk: Hand = deepcopy(self.deck)
+        dk.trumpify(ts)
+        dk.sort(key=key_display4human)
+        for card in self.hand:
+            dk.remove(card)
+        return dk
 
 
 PlayerType = TypeVar("PlayerType", bound=BasePlayer)
 
 
+class BaseComputer(BasePlayer, abc.ABC):
+    pass
+
+
+class BaseHuman(BasePlayer, abc.ABC):
+    def pick_card(self, valid_cards: Hand, **kwargs,) -> CardType:
+        trick_in_progress = kwargs.get("trick_in_progress")
+        if not trick_in_progress:
+            print(kwargs.get("prompt", "Choose the lead."))
+        proper_picks: List[int] = [
+            i for i in range(len(self.hand)) if self.hand[i] in valid_cards
+        ]
+        print("  ".join([repr(c) for c in self.hand]))
+        print(
+            "  ".join(
+                [f"{j:2}" if j in proper_picks else "  " for j in range(len(self.hand))]
+            )
+        )
+        return self.hand.pop(
+            int(
+                click.prompt(
+                    f"Index of card to {kwargs.get('p_word', 'play')}",
+                    type=click.Choice([str(pp) for pp in proper_picks], False),
+                    show_choices=False,
+                    default=proper_picks[0] if len(proper_picks) == 1 else None,
+                )
+            )
+        )
+
+
 class BaseTeam:
-    def __init__(self, players: "Iterable[TeamPlayer]"):
+    def __init__(self, players: "Iterable[PlayerType]"):
         for player in players:
             player.team = self
-        self.players: Set[TeamPlayer] = set(players)
+        self.players: Set[PlayerType] = set(players)
 
 
 TeamType = TypeVar("TeamType", bound=BaseTeam)
 
 
-class TeamPlayer(BasePlayer, abc.ABC):
-    team: TeamType
-
-
 class BaseGame(abc.ABC):
+    def __init__(
+        self,
+        player_names: List[str],
+        player_types: List[Type[BasePlayer]],
+        team_size: int,
+        card_type: Type[Cardstock],
+        deck_generator: Callable[[Type[Cardstock]], Hand],
+        team_type: Type[BaseTeam],
+        victory_threshold: int,
+        start: str = str(datetime.now()).split(".")[0],
+    ):
+        # constants
+        self.victory_threshold = victory_threshold
+        self.start_time: str = start
+        # make the deck
+        self.kitty: Hand[CardType] = Hand()
+        self.deck: Hand[CardType] = deck_generator(card_type)
+        self.suit_safety: Dict[Suit, Union[None, bool, TeamType]] = {}
+        self.reset_suit_safety()
+        # create players and teams
+        self.players: List[PlayerType] = make_players(
+            player_names, player_types, self.deck,
+        )
+        self.handedness: int = len(self.players)
+        assert (
+            self.handedness % team_size == 0 and self.handedness // team_size > 1
+        ), f"{self.handedness} players can't divide into teams of {team_size}"
+        self.teams: Set[TeamType] = {
+            team_type(self.players[i :: self.handedness // team_size])
+            for i in range(team_size)
+        }
+        # set up player rotation
+        for i in range(self.handedness):
+            nxt: PlayerType = self.players[(i + 1) % self.handedness]
+            self.players[i].next_player = nxt
+            nxt.previous_player = self.players[i]
+            self.players[i].opposite_player = (
+                self.players[(i + self.handedness // 2) % self.handedness]
+                if self.handedness % 2 == 0
+                else None
+            )
+        # initial dealer for 4-hands should be South
+        self.current_dealer: PlayerType = self.players[2]
+
+    def reset_suit_safety(self) -> None:
+        self.suit_safety = {s: False for s in suits}
+
+    def deal(
+        self, minimum_kitty_size: int = 0, shuffled: bool = True
+    ) -> Hand[CardType]:
+        """
+        Enforces an equal-size deal
+        :param shuffled: is the deck shuffled first?
+        :param minimum_kitty_size: the minimum size of the kitty
+        :return: the kitty
+        """
+        deck_size: int = len(self.deck)
+        # for card in self.deck:  # for debugging
+        #     assert card.suit != Suit.TRUMP, f"{card} {repr(card)}"
+        if shuffled:
+            random.shuffle(self.deck)
+        k_size: int = minimum_kitty_size + (
+            deck_size - minimum_kitty_size
+        ) % self.handedness
+        k_dex: Optional[int] = deck_size if k_size == 0 else -k_size
+        self.kitty = Hand(self.deck[k_dex:])
+        for i in range(self.handedness):
+            self.players[i].hand = deepcopy(
+                Hand(self.deck[i : k_dex : self.handedness])
+            )
+            self.players[i].reset_unplayed()
+        return self.kitty
+
     @abc.abstractmethod
     def play(self):
         pass
 
     @abc.abstractmethod
-    def victory_check(self) -> Tuple[int, Union[BaseTeam, BasePlayer, None]]:
+    def play_hand(self, dealer: PlayerType) -> PlayerType:
         pass
+
+    @abc.abstractmethod
+    def play_trick(self, lead: PlayerType) -> PlayerType:
+        pass
+
+    @abc.abstractmethod
+    def victory_check(self) -> Tuple[int, Optional[WithScore]]:
+        pass
+
+    @abc.abstractmethod
+    def write_log(self, ld: str, splitter: str = "\t|\t") -> None:
+        stop_time: str = str(datetime.now()).split(".")[0]
+        f: TextIO = open(os.path.join(ld, f"{self.start_time}.gamelog"), "w")
+        t_l: List[BaseTeam] = list(self.teams)  # give a consistent ordering
+
+        def w(msg):
+            click.echo(msg, f)
+
+        # Headers
+        # Body
+        # Conclusion
+
+        f.close()
 
 
 GameType = TypeVar("GameType", bound=BaseGame)
+
+
+def is_prime(n: int):
+    """
+    Primality test
+    from https://stackoverflow.com/questions/15285534/isprime-function-for-python-language
+    """
+    if n == 2 or n == 3:
+        return True
+    if n < 2 or n % 2 == 0:
+        return False
+    if n < 9:
+        return True
+    if n % 3 == 0:
+        return False
+    r = int(n ** 0.5)
+    f = 5
+    while f <= r:
+        print("\t", f)
+        if n % f == 0:
+            return False
+        if n % (f + 2) == 0:
+            return False
+        f += 6
+    return True
