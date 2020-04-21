@@ -89,11 +89,12 @@ class HumanPlayer(BaseHuman, Player):
     @property
     def choose_trump(self) -> Bid:
         p(self.hand)  # give a closer look at your hand before bidding
-        return Bid[
-            click.prompt(
-                "Declare Trump", type=click.Choice([c for c in Bid.__members__], False),
-            ).upper()
-        ]
+        bids: List[str] = [c for c in Bid.__members__]
+        bids.extend([Bid[c].short_name for c in Bid.__members__])
+        bid: str = click.prompt(
+            "Declare Trump", type=click.Choice(bids, False), show_choices=False,
+        ).upper()
+        return Bid[[b for b in Bid.__members__ if (bid in b)][0]]
 
     def make_bid(
         self,

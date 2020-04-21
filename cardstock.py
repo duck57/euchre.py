@@ -369,6 +369,7 @@ class Bid(Enum):
     def __init__(self, s: Optional[Suit], lo: bool):
         self.trump_suit: Optional[Suit] = s
         self.is_low: bool = lo
+        self.short_name: str = self.name[:-1].split("_")[0].lower()
 
 
 class WithScore:
