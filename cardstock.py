@@ -7,7 +7,7 @@
 Shared objects and functions for many card games, especially those
 where you take tricks
 """
-
+import itertools
 from enum import Enum, unique
 from itertools import cycle
 import random
@@ -45,6 +45,13 @@ def game_out_dir(gamename: Union[str, bytes]) -> str:
 @abc.abstractmethod
 def get_game_name() -> str:
     return os.path.basename(__file__).split(".py")[0]
+
+
+def p0(*msg):
+    """
+    dummy function for use when you don't want any output
+    """
+    pass
 
 
 def make_players(
@@ -246,7 +253,7 @@ class TrickPlay(NamedTuple):
 
 
 class Trick(List[TrickPlay]):
-    def winner(self, is_low: bool) -> Optional[TrickPlay]:
+    def winner(self, is_low: bool = False) -> Optional[TrickPlay]:
         if not self:
             return None
         w: TrickPlay = self[0]
@@ -255,6 +262,13 @@ class Trick(List[TrickPlay]):
                 w = cpt
         return w
 
+    def __add__(self, other):
+        if isinstance(other, Iterable):
+            self.extend(other)
+        elif isinstance(other, TrickPlay):
+            self.append(other)
+        return self
+
     @property
     def points(self) -> int:
         return 1
@@ -262,6 +276,13 @@ class Trick(List[TrickPlay]):
     @property
     def cards(self) -> "Hand":
         return Hand(c.card for c in self)
+
+    def follow_suit(
+        self, strict: bool = False, ot: "Optional[Type[Trick]]" = None
+    ) -> "TrickType":
+        if not ot:
+            ot: Type[Trick] = Trick
+        return ot(x for x in self if x.card.follows_suit(self[0].card.suit, strict))
 
 
 TrickType = TypeVar("TrickType", bound=Trick)
@@ -396,12 +417,14 @@ class BasePlayer(abc.ABC):
     opposite_player: "Optional[PlayerType]" = None
 
     def __init__(self, name: str, bot: int = 1, deck: Optional[Hand] = None):
+        if not deck:
+            deck = Hand()
         self.name: str = name
         self.is_bot: int = bot
         self.hand: Hand = Hand()
         self.deck: Hand = deepcopy(deck)
         self.card_count: Hand = deepcopy(deck)
-        self.tricks_taken: List[Trick] = []
+        self.tricks_taken: List[TrickType] = []
         self.sort_key: Callable[[CardType], int] = key_display4human
 
     def __str__(self):
@@ -416,9 +439,16 @@ class BasePlayer(abc.ABC):
     ):
         pass
 
-    def play_card(self, trick_in_progress: "Trick", /, **kwargs,) -> CardType:
-        for x in trick_in_progress:
-            self.card_count.remove(x.card)
+    def play_card(self, trick_in_progress: "TrickType", /, **kwargs,) -> CardType:
+        try:
+            for x in trick_in_progress:
+                self.card_count.remove(x.card)
+        except ValueError:
+            # This works fine with euchre.py
+            # Print is commented out for Hearts
+            # boosted nines create problems with this when playing Hearts
+            # print(f"{self}: {trick_in_progress.cards} not in {self.card_count}")
+            pass
         return self.pick_card(
             follow_suit(  # valid cards
                 trick_in_progress[0].card.suit if trick_in_progress else None,
@@ -436,20 +466,25 @@ class BasePlayer(abc.ABC):
     def teammates(self) -> "Set[PlayerType]":
         return self.team.players - {self}
 
-    def send_shooter(self, cards: int, p_word: str = "send") -> List[Card]:
+    def send_shooter(
+        self, cards: int, p_word: str = "send", prompt="Send a card to your friend."
+    ) -> List[Card]:
         if not cards:
             return []
         out = (
             self.hand[-cards:]
             if self.is_bot
             else [
-                self.pick_card(
-                    self.hand, p_word=p_word, prompt="Send a card to your friend."
-                )
+                self.pick_card(self.hand, p_word=p_word, prompt=prompt)
                 for _ in range(cards)
             ]
         )
         self.card_count += out
+        for c in out:
+            try:
+                self.hand.remove(c)
+            except ValueError:
+                print(f"{self}: {c} not found in {self.hand}")
         return out
 
     def sort_hand(self, is_low: bool = False) -> None:
@@ -462,19 +497,45 @@ class BasePlayer(abc.ABC):
     def receive_cards(self, cards_in: Iterable[CardType]) -> None:
         self.hand += cards_in
         self.sort_hand()
+        # print(self, cards_in, "\n", self.card_count)
         for c in cards_in:
             self.card_count.remove(c)
 
-    def reset_unplayed(self, ts: Optional[Suit] = None,) -> Hand:
+    def reset_unplayed(self, ts: Optional[Suit] = None) -> Hand:
         dk: Hand = deepcopy(self.deck)
         dk.trumpify(ts)
         dk.sort(key=key_display4human)
         for card in self.hand:
             dk.remove(card)
+        self.card_count = dk
         return dk
+
+    def pass_left(self, c: Union[CardType, List[CardType]]) -> None:
+        self.next_player.receive_cards(list(c))
+
+    def pass_right(self, c: Union[CardType, List[CardType]]) -> None:
+        self.previous_player.receive_cards(list(c))
+
+    def pass_across(self, c: Union[CardType, List[CardType]]) -> None:
+        if self.opposite_player:
+            self.opposite_player.receive_cards(list(c))
+        else:
+            self.pass_hold(c)
+
+    def pass_hold(self, c: Union[CardType, List[CardType]]) -> None:
+        self.receive_cards(list(c))
 
 
 PlayerType = TypeVar("PlayerType", bound=BasePlayer)
+
+
+def get_play_order(lead: PlayerType) -> List[PlayerType]:
+    p_c = lead
+    out = []
+    while p_c not in out:
+        out.append(p_c)
+        p_c = p_c.next_player
+    return out
 
 
 class BaseComputer(BasePlayer, abc.ABC):
@@ -513,8 +574,46 @@ class BaseTeam:
             player.team = self
         self.players: Set[PlayerType] = set(players)
 
+    def __repr__(self):
+        return "/".join([pl.name for pl in self.players])
+
 
 TeamType = TypeVar("TeamType", bound=BaseTeam)
+
+
+def deal(
+    players: List[PlayerType],
+    deck: Hand,
+    minimum_kitty_size: int = 0,
+    shuffled: bool = True,
+    replace: bool = True,
+) -> Hand:
+    """
+    Enforces an equal-size deal
+    :param players: list of players to whom to deal
+    :param deck: the deck from which the cards are dealt
+    :param shuffled: is the deck shuffled first?
+    :param minimum_kitty_size: the minimum size of the kitty
+    :param replace: replaces the player's hand if true; appends if false
+    :return: the kitty
+    """
+    deck_size: int = len(deck)
+    handedness = len(players)
+    # for card in self.deck:  # for debugging
+    #     assert card.suit != Suit.TRUMP, f"{card} {repr(card)}"
+    if shuffled:
+        random.shuffle(deck)
+    k_size: int = minimum_kitty_size + (deck_size - minimum_kitty_size) % handedness
+    k_dex: Optional[int] = deck_size if k_size == 0 else -k_size
+    kitty: Hand = Hand(deck[k_dex:])
+    for i in range(handedness):
+        h: Hand = deepcopy(Hand(deck[i:k_dex:handedness]))
+        if replace:
+            players[i].hand = h
+        else:
+            players[i].hand += h
+        players[i].reset_unplayed()
+    return kitty
 
 
 class BaseGame(abc.ABC):
@@ -547,7 +646,7 @@ class BaseGame(abc.ABC):
         ), f"{self.handedness} players can't divide into teams of {team_size}"
         self.teams: Set[TeamType] = {
             team_type(self.players[i :: self.handedness // team_size])
-            for i in range(team_size)
+            for i in range(self.handedness // team_size)
         }
         # set up player rotation
         for i in range(self.handedness):
@@ -559,6 +658,7 @@ class BaseGame(abc.ABC):
                 if self.handedness % 2 == 0
                 else None
             )
+            self.players[i].deck = deepcopy(self.deck)
         # initial dealer for 4-hands should be South
         self.current_dealer: PlayerType = self.players[2]
 
@@ -568,27 +668,8 @@ class BaseGame(abc.ABC):
     def deal(
         self, minimum_kitty_size: int = 0, shuffled: bool = True
     ) -> Hand[CardType]:
-        """
-        Enforces an equal-size deal
-        :param shuffled: is the deck shuffled first?
-        :param minimum_kitty_size: the minimum size of the kitty
-        :return: the kitty
-        """
-        deck_size: int = len(self.deck)
-        # for card in self.deck:  # for debugging
-        #     assert card.suit != Suit.TRUMP, f"{card} {repr(card)}"
-        if shuffled:
-            random.shuffle(self.deck)
-        k_size: int = minimum_kitty_size + (
-            deck_size - minimum_kitty_size
-        ) % self.handedness
-        k_dex: Optional[int] = deck_size if k_size == 0 else -k_size
-        self.kitty = Hand(self.deck[k_dex:])
-        for i in range(self.handedness):
-            self.players[i].hand = deepcopy(
-                Hand(self.deck[i : k_dex : self.handedness])
-            )
-            self.players[i].reset_unplayed()
+        self.kitty = deal(self.players, self.deck, minimum_kitty_size, shuffled, True)
+        # print([f"{p} {p.card_count}" for p in self.players])
         return self.kitty
 
     @abc.abstractmethod
@@ -642,10 +723,43 @@ def is_prime(n: int):
     r = int(n ** 0.5)
     f = 5
     while f <= r:
-        print("\t", f)
         if n % f == 0:
             return False
         if n % (f + 2) == 0:
             return False
         f += 6
     return True
+
+
+def pass_cards(
+    playlist: List[PlayerType], directions: List[Callable], kitty: Hand,
+) -> None:
+    if pass_kitty in directions:
+        return pass_kitty(playlist, kitty, len(directions))
+    where_to: List[Tuple[PlayerType, Callable]] = [
+        x for x in itertools.product(playlist, directions) if x[1] != pass_hold
+    ]
+    # collect cards
+    cards: List[CardType] = [
+        p.send_shooter(1, a.__name__.replace("_", " ")) for p, a in where_to
+    ]
+    # pass the cards
+    for i in range(len(cards)):
+        getattr(where_to[i][0], where_to[i][1].__name__)(cards[i])
+
+
+def pass_kitty(
+    playlist: List[PlayerType],
+    kitty: Hand,
+    strength: int = 3,
+    minimum_kitty_size: int = 0,
+) -> None:
+    for p in playlist:
+        kitty += p.send_shooter(strength)
+    kitty = deal(playlist, kitty, replace=False, minimum_kitty_size=minimum_kitty_size)
+
+
+pass_left = BasePlayer.pass_left
+pass_right = BasePlayer.pass_right
+pass_across = BasePlayer.pass_across
+pass_hold = BasePlayer.pass_hold

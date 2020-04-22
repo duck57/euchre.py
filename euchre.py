@@ -294,9 +294,6 @@ class Team(BaseTeam, MakesBid, WithScore):
         self.bid_history: List[str] = []
         self.tricks_taken: List[int] = []
 
-    def __repr__(self):
-        return "/".join([pl.name for pl in self.players])
-
     def hand_tab(self, hand: Optional[int], tab: str = "\t") -> str:
         return tab.join(
             [
@@ -409,7 +406,7 @@ class BidEuchre(BaseGame):
         hn: int = len(dealer.team.score_changes) + 1
         p(f"\nHand {hn}")
         p(f"Dealer: {dealer}")
-        po: List[Player] = get_play_order(dealer, self.handedness)
+        po: List[Player] = get_play_order(dealer)
         po.append(po.pop(0))  # because the dealer doesn't lead bidding
         self.reset_suit_safety()  # reset the unsafe suits
 
@@ -584,13 +581,6 @@ class BidEuchre(BaseGame):
 
 def score_key(t: Team) -> int:
     return t.score
-
-
-def get_play_order(lead: Player, handedness: int) -> List[Player]:
-    po: List[Player] = [lead]
-    for i in range(handedness - 1):
-        po.append(po[-1].next_player)
-    return po
 
 
 # normal euchre would be an entirely different function because of the kitty
