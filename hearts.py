@@ -45,8 +45,9 @@ class PointHeartCard(HeartCard):
     @property
     def value(self) -> int:
         if self.suit != Suit.HEART:
+            # balance & enhance Q♠️, J♦️
             return 2 * super().value
-        if self.rank < Rank.JACK:
+        if self.rank < Rank.QUEEN:
             return self.rank.v
         if self.rank == Rank.ACE_HI:
             return 15
@@ -54,12 +55,26 @@ class PointHeartCard(HeartCard):
 
 
 class DirtHeartCard(PointHeartCard):
+    """
+    Modified from the DNFH scoring:
+    hearts are worth more, jacks & kings are helpful
+    """
+
     @property
     def value(self) -> int:
         if self.rank == Rank.QUEEN:
+            # queens are 13 each
             if self.suit == Suit.SPADE:
                 return super().value
             return 13
+        if self.suit == Suit.HEART:
+            if self.rank < Rank.KING:
+                return super().value
+            return {Rank.KING: 5, Rank.ACE_HI: 1}[self.rank]
+        if self.rank == Rank.JACK and self.suit.color != Color.RED:
+            return -6
+        if self.rank == Rank.KING:
+            return -1
         return super().value
 
 
@@ -142,18 +157,6 @@ class HeartTrick(Trick):
         return super().follow_suit(strict, HeartTrick)
 
 
-pass_order_all = [
-    pass_left,
-    pass_right,
-    pass_across,
-    pass_hold,
-    pass_kitty,
-]
-pass_order_ms_hearts_exe = pass_order_all[:-1]
-pass_order_no_hold_even = pass_order_all[:3]
-pass_order_no_hold_odd = pass_order_all[:2]
-
-
 class Hearts(BaseGame):
     def __init__(
         self,
@@ -182,6 +185,8 @@ class Hearts(BaseGame):
         self.pass_size = pass_size
         for pl in self.players:
             pl.deck = deepcopy(self.deck)
+        self.moon_points: int = self.deck.pointable.points
+        self.sun_cards: int = len(self.deck)
 
     def team_scores(self, pf: Callable = print) -> List[TeamType]:
         teams_by_score = sorted(self.teams, key=key_score)
@@ -226,6 +231,7 @@ class Hearts(BaseGame):
             lead, bh, f = self.play_trick(lead, broken_heart=bh, first=f)
         # tally score
         p(f"Hand {hn} results:")
+
         for pl in po:
             sc = sum([tt.points for tt in pl.tricks_taken])
             pl.score = sc

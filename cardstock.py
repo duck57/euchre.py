@@ -338,6 +338,21 @@ class Hand(List[CardType]):
             self.extend(self)
         return self
 
+    @property
+    def points(self) -> int:
+        return sum([c.value for c in self])
+
+    @property
+    def pointable(self) -> "Hand":
+        """
+        :return: Hand of cards with positive point values, intended for Hearts
+        """
+        return Hand(c for c in self if c.value > 0)
+
+    @property
+    def point_free(self) -> "Hand":
+        return Hand(c for c in self if c.value < 1)
+
 
 def make_deck(r: List[Rank], s: List[Suit], c: Type[Cardstock] = Card) -> Hand:
     return Hand(c(rank, suit) for rank in r for suit in s)
@@ -362,20 +377,41 @@ def make_standard_deck(c: Type[Cardstock] = Card) -> Hand:
 
 
 def follow_suit(
-    s: Optional[Suit], cs: Iterable[CardType], strict: Optional[bool] = True
+    s: Optional[Suit],
+    cs: Iterable[CardType],
+    strict: Optional[bool] = True,
+    allow_heart: bool = True,
+    allow_points: bool = True,
+    ok_empty: bool = False,
 ) -> Hand:
-    # strict filtering
-    if not s:
-        return cs if isinstance(cs, Hand) else Hand(cs)
-    if strict is not None:
-        return Hand(c for c in cs if (c.follows_suit(s, strict)))
-
-    # strict is None gives cards that follow suit
-    if valid_cards := follow_suit(s, cs, True):
+    """
+    :param s: suit to follow
+    :param cs: cards to filter
+    :param strict: count trump cards as following suit?
+    :param allow_heart: (for Hearts)
+    :param allow_points: (for Hearts), used on first trick
+    :param ok_empty: return an empty Hand if no cards match if true
+                     else return all input cards
+    :return: cards that follow suit
+    """
+    valid_cards = Hand(deepcopy(cs))
+    if strict is None:
+        strict = True
+        ok_empty = False
+    # stuff for Hearts
+    if not allow_points:
+        valid_cards = Hand(c for c in valid_cards if (c.value < 1))
+        if not valid_cards and not ok_empty:
+            return follow_suit(s, cs, strict, allow_heart, True)
+    if not allow_heart:
+        valid_cards = Hand(c for c in valid_cards if (c.suit != Suit.HEART))
+        if not valid_cards and not ok_empty:
+            return follow_suit(s, cs, strict, True, allow_points)
+    if not s:  # no suit returns all valid cards
         return valid_cards
-    # if valid_cards := follow_suit(s, cs, False):
-    #     return valid_cards
-    return follow_suit(None, cs, None)
+    if (valid_cards := Hand(c for c in cs if (c.follows_suit(s, strict)))) or ok_empty:
+        return valid_cards
+    return follow_suit(None, cs, strict, allow_points, allow_heart)
 
 
 @unique
@@ -424,7 +460,7 @@ class BasePlayer(abc.ABC):
         self.hand: Hand = Hand()
         self.deck: Hand = deepcopy(deck)
         self.card_count: Hand = deepcopy(deck)
-        self.tricks_taken: List[TrickType] = []
+        self.tricks_taken: List[Hand] = []
         self.sort_key: Callable[[CardType], int] = key_display4human
 
     def __str__(self):
@@ -454,6 +490,8 @@ class BasePlayer(abc.ABC):
                 trick_in_progress[0].card.suit if trick_in_progress else None,
                 self.hand,
                 strict=None,
+                allow_heart=kwargs.get("broken_hearts", True),
+                allow_points=kwargs.get("first", True),
             ),
             full_hand=self.hand,  # your hand
             trick_in_progress=trick_in_progress,  # current trick
@@ -763,3 +801,14 @@ pass_left = BasePlayer.pass_left
 pass_right = BasePlayer.pass_right
 pass_across = BasePlayer.pass_across
 pass_hold = BasePlayer.pass_hold
+
+pass_order_all = [
+    pass_left,
+    pass_right,
+    pass_across,
+    pass_hold,
+    pass_kitty,
+]
+pass_order_ms_hearts_exe = pass_order_all[:-1]
+pass_order_no_hold_even = pass_order_all[:3]
+pass_order_no_hold_odd = pass_order_all[:2]

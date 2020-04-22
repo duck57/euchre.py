@@ -238,6 +238,8 @@ class ComputerPlayer(BaseComputer, Player):
                 sorted(
                     h.trumpify(t.trump_suit), key=key_trump_power, reverse=not t.is_low,
                 ),
+                strict=True,
+                ok_empty=True,
             )
 
         return sum(
@@ -279,7 +281,7 @@ class ComputerPlayer(BaseComputer, Player):
         ):
             me: List[Card] = match_by_rank(my_suit, rank)
             oth: List[Card] = match_by_rank(mystery_suit, rank)
-            # p((me, rank, oth))  # debugging
+            # p(f"{me} {rank} {oth}")  # debugging
             est.extend(me)
             if oth and (strict or not me and not strict):
                 break  # there are mystery cards that beat your cards
