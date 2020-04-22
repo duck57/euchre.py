@@ -90,6 +90,7 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
     def __init__(self, name: str, bot: int = 1, deck: Optional[Hand] = None):
         BasePlayer.__init__(self, name, bot, deck)
         WithScore.__init__(self)
+        self.trick_history: List = []
 
     def play_card(self, trick_in_progress: "TrickType", /, **kwargs,) -> CardType:
         # p(f"{trick_in_progress} {kwargs}")
@@ -101,6 +102,13 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
     def reset_unplayed(self, ts: Optional[Suit] = None) -> Hand:
         self.tricks_taken = []
         return super().reset_unplayed(ts)
+
+    def hand_tab(self, hand: Optional[int], tab: str = "\t") -> str:
+        return tab.join(
+            [str(len(self.trick_history[hand])), str(self.score_changes[hand]),]
+            if hand is not None
+            else [str(sum([len(x) for x in self.trick_history])), str(self.score),]
+        )
 
 
 class HeartTeam(BaseTeam, WithScore):
@@ -236,6 +244,7 @@ class Hearts(BaseGame):
             sc = sum([tt.points for tt in pl.tricks_taken])
             pl.score = sc
             p(f"{pl}: {'+' if sc > 0 else ''}{sc} to total {pl.score}")
+            pl.trick_history.append(pl.tricks_taken)
         return dealer.next_player
 
     def play_trick(
@@ -297,7 +306,58 @@ class Hearts(BaseGame):
         p(f"{w} wins!")
 
     def write_log(self, ld: str, splitter: str = "\t|\t") -> None:
-        pass
+        stop_time: str = str(datetime.now()).split(".")[0]
+        f: TextIO = open(os.path.join(ld, f"{self.start_time}.gamelog"), "w")
+
+        def w(msg):
+            click.echo(msg, f)
+
+        # headers
+        w(splitter.join([self.start_time] + [f"{t}\t" for t in self.players]))
+        w(splitter.join([""] + ["Tricks Taken\tScore Change" for _ in self.players]))
+        w(splitter.join(["Hand"] + ["===\t===" for _ in self.players]))
+        w(  # body
+            "\n".join(
+                [
+                    splitter.join(
+                        [f"{hand + 1}"] + [t.hand_tab(hand) for t in self.players]
+                    )
+                    for hand in range(len(self.players[0].score_changes))
+                ]
+            )
+        )
+        # totals
+        w(splitter.join([stop_time] + ["===\t===" for _ in self.players]))
+        w(splitter.join(["Totals"] + [t.hand_tab(None) for t in self.players]))
+
+        # team stats
+        if len(self.teams) < len(self.players):  # more than 1 player per "team"
+            w("\n\n")
+            w("\t".join(["Team Score History"] + [f"{t}" for t in self.teams]))
+            w(  # body
+                "\n".join(
+                    [
+                        "\t".join(
+                            [f"{hand + 1}"]
+                            + [
+                                str(
+                                    sum(
+                                        [
+                                            sum(pj.score_changes[: hand + 1])
+                                            for pj in t.players
+                                        ]
+                                    )
+                                )
+                                for t in self.teams
+                            ]
+                        )
+                        for hand in range(len(self.players[0].score_changes))
+                    ]
+                )
+            )
+            # w("\n\n")
+            # self.team_scores(w)
+        f.close()
 
 
 @click.command()
