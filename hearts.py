@@ -97,7 +97,14 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
         if not trick_in_progress and kwargs.get("first"):
             p("Two of clubs to start")
             return self.hand.pop(0)  # two of clubs
-        return super().play_card(trick_in_progress, **kwargs)
+        broken_heart: bool = kwargs.get("broken_heart", True)
+        return super().play_card(
+            trick_in_progress,
+            points_ok=(not kwargs.get("first", False))
+            or ((not trick_in_progress) and not broken_heart),
+            hearts_ok=bool(trick_in_progress) or broken_heart,
+            **kwargs,
+        )
 
     def reset_unplayed(self, ts: Optional[Suit] = None) -> Hand:
         self.tricks_taken = []

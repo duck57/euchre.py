@@ -388,7 +388,7 @@ def follow_suit(
     :param s: suit to follow
     :param cs: cards to filter
     :param strict: count trump cards as following suit?
-    :param allow_heart: (for Hearts)
+    :param allow_heart: (for Hearts), removes hearts if no suit to follow
     :param allow_points: (for Hearts), used on first trick
     :param ok_empty: return an empty Hand if no cards match if true
                      else return all input cards
@@ -400,14 +400,17 @@ def follow_suit(
         ok_empty = False
     # stuff for Hearts
     if not allow_points:
+        print("Removing point cards")
         valid_cards = Hand(c for c in valid_cards if (c.value < 1))
         if not valid_cards and not ok_empty:
             return follow_suit(s, cs, strict, allow_heart, True)
-    if not allow_heart:
-        valid_cards = Hand(c for c in valid_cards if (c.suit != Suit.HEART))
-        if not valid_cards and not ok_empty:
-            return follow_suit(s, cs, strict, True, allow_points)
-    if not s:  # no suit returns all valid cards
+    if not s:  # no suit returns all valid cards, usually means you have lead
+        if not allow_heart:
+            print("Removing hearts")
+            valid_cards = Hand(c for c in valid_cards if (c.suit != Suit.HEART))
+            if not valid_cards and not ok_empty:
+                print("Allowing hearts now")
+                return follow_suit(s, cs, strict, True, allow_points)
         return valid_cards
     if (valid_cards := Hand(c for c in cs if (c.follows_suit(s, strict)))) or ok_empty:
         return valid_cards
@@ -490,8 +493,8 @@ class BasePlayer(abc.ABC):
                 trick_in_progress[0].card.suit if trick_in_progress else None,
                 self.hand,
                 strict=None,
-                allow_heart=kwargs.get("broken_hearts", True),
-                allow_points=kwargs.get("first", True),
+                allow_heart=kwargs.get("hearts_ok", True),
+                allow_points=kwargs.get("points_ok", True),
             ),
             full_hand=self.hand,  # your hand
             trick_in_progress=trick_in_progress,  # current trick
