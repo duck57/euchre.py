@@ -180,7 +180,8 @@ class Hearts(BaseGame):
         self.deck = self.deck * (self.handedness // 6 + 1)
         self.pass_order = cycle(pass_order)
         self.pass_size = pass_size
-        p(self.teams)
+        for pl in self.players:
+            pl.deck = deepcopy(self.deck)
 
     def team_scores(self, pf: Callable = print) -> List[TeamType]:
         teams_by_score = sorted(self.teams, key=key_score)
