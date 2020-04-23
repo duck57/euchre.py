@@ -337,6 +337,11 @@ class Hearts(BaseGame):
                 if c.suit == t[0].card.suit and c.rank == Rank.NINE:
                     p("Boosted 9!")
                     boost9 = True
+                l_suit: Suit = t.lead_suit
+                if c.suit != l_suit:
+                    self.suit_safety[l_suit] = (
+                        True if self.suit_safety[l_suit] else player
+                    )
             return bh, boost9
 
         w: Optional[TrickPlay] = None

@@ -410,7 +410,6 @@ class BidEuchre(BaseGame):
         p(f"Dealer: {dealer}")
         po: List[Player] = get_play_order(dealer)
         po.append(po.pop(0))  # because the dealer doesn't lead bidding
-        self.reset_suit_safety()  # reset the unsafe suits
 
         # deal the cards
         for pl in po:
@@ -503,12 +502,12 @@ class BidEuchre(BaseGame):
 
         # find the winner
         w: TrickPlay = trick_in_progress.winner(is_low)
-        l: Card = trick_in_progress[0].card
         w.played_by.tricks += 1
         p(f"{w.played_by.name} won the trick\n")
-        if w.card.suit != l.suit:
-            self.suit_safety[l.suit] = (
-                True if self.suit_safety[l.suit] else w.played_by.team
+        l_suit: Suit = trick_in_progress.lead_suit
+        if w.card.suit != l_suit:
+            self.suit_safety[l_suit] = (
+                True if self.suit_safety[l_suit] else w.played_by.team
             )
         return w.played_by
 

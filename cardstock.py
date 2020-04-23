@@ -282,7 +282,15 @@ class Trick(List[TrickPlay]):
     ) -> "TrickType":
         if not ot:
             ot: Type[Trick] = Trick
-        return ot(x for x in self if x.card.follows_suit(self[0].card.suit, strict))
+        return ot(x for x in self if x.card.follows_suit(self.lead_suit, strict))
+
+    @property
+    def lead(self) -> Optional[CardType]:
+        return self[0].card if self else None
+
+    @property
+    def lead_suit(self) -> Optional[Suit]:
+        return self.lead.suit if self.lead else None
 
 
 TrickType = TypeVar("TrickType", bound=Trick)
@@ -486,7 +494,7 @@ class BasePlayer(abc.ABC):
     def play_card(self, trick_in_progress: "TrickType", /, **kwargs,) -> CardType:
         return self.pick_card(
             follow_suit(  # valid cards
-                trick_in_progress[0].card.suit if trick_in_progress else None,
+                trick_in_progress.lead_suit if trick_in_progress else None,
                 self.hand,
                 strict=None,
                 allow_heart=kwargs.get("hearts_ok", True),
@@ -672,7 +680,7 @@ class BaseGame(abc.ABC):
         # make the deck
         self.kitty: Hand[CardType] = Hand()
         self.deck: Hand[CardType] = deck_generator(card_type)
-        self.suit_safety: Dict[Suit, Union[None, bool, TeamType]] = {}
+        self.suit_safety: Dict[Suit, Union[None, bool, TeamType, PlayerType]] = {}
         self.reset_suit_safety()
         # create players and teams
         self.players: List[PlayerType] = make_players(
@@ -707,6 +715,7 @@ class BaseGame(abc.ABC):
         self, minimum_kitty_size: int = 0, shuffled: bool = True
     ) -> Hand[CardType]:
         self.kitty = deal(self.players, self.deck, minimum_kitty_size, shuffled, True)
+        self.reset_suit_safety()
         # print([f"{p} {p.card_count}" for p in self.players])
         return self.kitty
 
