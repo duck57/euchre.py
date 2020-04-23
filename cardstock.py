@@ -205,8 +205,8 @@ class Cardstock:
             return False  # must follow suit
         return (self < other) if is_low else (self > other)
 
-    def follows_suit(self, s: Suit, strict: bool = True) -> bool:
-        return self.suit == s or self.suit == Suit.TRUMP and not strict
+    def follows_suit(self, s: Optional[Suit], strict: bool = True) -> bool:
+        return s is None or (self.suit == s or self.suit == Suit.TRUMP and not strict)
 
     @property
     def value(self) -> int:
@@ -380,41 +380,46 @@ def follow_suit(
     s: Optional[Suit],
     cs: Iterable[CardType],
     strict: Optional[bool] = True,
-    allow_heart: bool = True,
     allow_points: bool = True,
     ok_empty: bool = False,
+    **kwargs,
 ) -> Hand:
     """
     :param s: suit to follow
     :param cs: cards to filter
     :param strict: count trump cards as following suit?
-    :param allow_heart: (for Hearts), removes hearts if no suit to follow
     :param allow_points: (for Hearts), used on first trick
+                         or when leading before heartbreak
     :param ok_empty: return an empty Hand if no cards match if true
                      else return all input cards
     :return: cards that follow suit
     """
-    valid_cards = Hand(deepcopy(cs))
+
+    # print(s, cs, strict, allow_points, ok_empty)  # debugging
+    if not cs:
+        # stop here on an empty input
+        return Hand(cs)
     if strict is None:
+        # activate a preset
         strict = True
         ok_empty = False
-    # stuff for Hearts
     if not allow_points:
-        print("Removing point cards")
-        valid_cards = Hand(c for c in valid_cards if (c.value < 1))
-        if not valid_cards and not ok_empty:
-            return follow_suit(s, cs, strict, allow_heart, True)
-    if not s:  # no suit returns all valid cards, usually means you have lead
-        if not allow_heart:
-            print("Removing hearts")
-            valid_cards = Hand(c for c in valid_cards if (c.suit != Suit.HEART))
-            if not valid_cards and not ok_empty:
-                print("Allowing hearts now")
-                return follow_suit(s, cs, strict, True, allow_points)
-        return valid_cards
-    if (valid_cards := Hand(c for c in cs if (c.follows_suit(s, strict)))) or ok_empty:
-        return valid_cards
-    return follow_suit(None, cs, strict, allow_points, allow_heart)
+        # filter out the pointable cards and try again
+        return follow_suit(s, [c for c in cs if (c.value < 1)], strict, True, ok_empty)
+    if not ok_empty:
+        # take 1
+        valid_cards = follow_suit(s, cs, strict, allow_points, True)
+        if valid_cards:
+            return valid_cards
+        # try again with no suit requirements
+        valid_cards = follow_suit(None, cs, strict, allow_points, True)
+        if valid_cards:
+            return valid_cards
+        # final try where you allow pointable cards
+        # this should return the whole input set
+        return follow_suit(None, cs, strict, True, True)
+    # return cards that follow suit
+    return Hand(c for c in cs if (c.follows_suit(s, strict)))
 
 
 @unique
@@ -495,6 +500,7 @@ class BasePlayer(abc.ABC):
                 strict=None,
                 allow_heart=kwargs.get("hearts_ok", True),
                 allow_points=kwargs.get("points_ok", True),
+                ok_empty=False,
             ),
             full_hand=self.hand,  # your hand
             trick_in_progress=trick_in_progress,  # current trick
@@ -743,6 +749,55 @@ class BaseGame(abc.ABC):
         # Conclusion
 
         f.close()
+
+
+def make_null_deck(c: Type[Cardstock]) -> Hand:
+    return Hand()
+
+
+class TestGame(BaseGame, abc.ABC):
+    """
+    A test harness to give players a predefined deal
+    Use me to check for consistency in rare behavior
+    """
+
+    p_type: Type[BaseComputer]
+
+    def __init__(
+        self,
+        team_size: int,
+        card_type: Type[Cardstock],
+        team_type: Type[BaseTeam],
+        preset_hands: List[Hand],
+        **kwargs,
+    ):
+        self.handedness = len(preset_hands)
+        super().__init__(
+            [str(x) for x in range(self.handedness)],
+            [self.p_type for _ in range(self.handedness)],
+            team_size,
+            card_type,
+            deck_generator=make_null_deck,
+            team_type=team_type,
+            victory_threshold=0,
+        )
+        for p in preset_hands:
+            self.deck.extend(p)
+        self.p_hands = preset_hands
+        self.kitty = kwargs.get("kitty", Hand())
+
+    def victory_check(self) -> Tuple[int, Optional[WithScore]]:
+        return 1, None
+
+    def write_log(self, ld: str, splitter: str = "\t|\t") -> None:
+        pass
+
+    def deal(
+        self, minimum_kitty_size: int = 0, shuffled: bool = True
+    ) -> Hand[CardType]:
+        for i in range(self.handedness):
+            self.players[i].hand = self.p_hands[i]
+        return self.kitty()
 
 
 GameType = TypeVar("GameType", bound=BaseGame)

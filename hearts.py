@@ -90,19 +90,45 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
     def __init__(self, name: str, bot: int = 1, deck: Optional[Hand] = None):
         BasePlayer.__init__(self, name, bot, deck)
         WithScore.__init__(self)
-        self.trick_history: List = []
+        self.trick_history: List[Hand] = []
+
+    @staticmethod
+    def allow_points(first_trick: bool, broken_heart: bool, lead: bool) -> bool:
+        if first_trick:
+            return False
+        if broken_heart:
+            return True
+        if lead:
+            return False
+        return True
 
     def play_card(self, trick_in_progress: "TrickType", /, **kwargs,) -> CardType:
         # p(f"{trick_in_progress} {kwargs}")
-        if not trick_in_progress and kwargs.get("first"):
+        first_trick: bool = kwargs.get("first", False)
+        lead: bool = not trick_in_progress
+        if lead and first_trick:
             p("Two of clubs to start")
             return self.hand.pop(0)  # two of clubs
         broken_heart: bool = kwargs.get("broken_heart", True)
+        # p(
+        #     "\t".join(
+        #         [
+        #             " ".join(["First", "trick?", first_trick]),
+        #             " ".join(["Heartbreak?", broken_heart]),
+        #             " ".join(["Lead", lead]),
+        #             " ".join(
+        #                 [
+        #                     "Points",
+        #                     "ok?",
+        #                     self.allow_points(first_trick, broken_heart, lead),
+        #                 ]
+        #             ),
+        #         ]
+        #     )
+        # )
         return super().play_card(
             trick_in_progress,
-            points_ok=(not kwargs.get("first", False))
-            or ((not trick_in_progress) and not broken_heart),
-            hearts_ok=bool(trick_in_progress) or broken_heart,
+            points_ok=self.allow_points(first_trick, broken_heart, lead),
             **kwargs,
         )
 
@@ -116,6 +142,10 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
             if hand is not None
             else [str(sum([len(x) for x in self.trick_history])), str(self.score),]
         )
+
+    @property
+    def current_trick(self) -> Hand:
+        return self.trick_history[-1]
 
 
 class HeartTeam(BaseTeam, WithScore):
@@ -200,7 +230,8 @@ class Hearts(BaseGame):
         self.pass_size = pass_size
         for pl in self.players:
             pl.deck = deepcopy(self.deck)
-        self.moon_points: int = self.deck.pointable.points
+        # moonshots are instant victory under DNFH rules
+        self.moon_points: int = self.deck.pointable.points if card_type != DirtHeartCard else victory_threshold ** 2
         self.sun_cards: int = len(self.deck)
 
     def team_scores(self, pf: Callable = print) -> List[TeamType]:
@@ -230,6 +261,8 @@ class Hearts(BaseGame):
         self.deal()
         hn: int = len(dealer.score_changes) + 1
         po: List[HeartPlayer] = get_play_order(dealer)
+        for pl in po:
+            pl.trick_history.append(Hand())
         # pass cards
         p(f"Hand {hn}, dealt by {dealer}")
         pass_cards(po, [next(self.pass_order)] * self.pass_size, self.kitty)
@@ -244,58 +277,73 @@ class Hearts(BaseGame):
         # play tricks
         while lead.hand:
             lead, bh, f = self.play_trick(lead, broken_heart=bh, first=f)
+
         # tally score
         p(f"Hand {hn} results:")
-
+        point_grid: Dict[HeartPlayer, int] = {
+            pl: pl.current_trick.pointable.points for pl in po
+        }
         for pl in po:
-            sc = sum([tt.points for tt in pl.tricks_taken])
+            recent: Hand = pl.trick_history[-1]
+            if len(recent) == len(self.deck):
+                # sun shot
+                for x in po:
+                    point_grid[x] = 2 * self.moon_points
+                    if x == pl:
+                        point_grid[x] = 0
+            if point_grid[pl] == self.moon_points:
+                # moonshot
+                for x in po:
+                    point_grid[x] = self.moon_points
+                    if x == pl:
+                        point_grid[x] = 0
+            point_grid[pl] += recent.point_free.points  # add cleansing cards
+        for pl in po:
+            sc: int = point_grid[pl]
             pl.score = sc
             p(f"{pl}: {'+' if sc > 0 else ''}{sc} to total {pl.score}")
-            pl.trick_history.append(pl.tricks_taken)
         return dealer.next_player
 
     def play_trick(
-        self, lead: HeartPlayer, first: bool = False, broken_heart: bool = False
+        self, lead: HeartPlayer, first: bool = False, broken_heart: bool = True
     ) -> Tuple[HeartPlayer, bool, bool]:
         po: List[HeartPlayer] = get_play_order(lead)
         t = HeartTrick()
         p(f"{lead} starts")
 
         # play cards
-        def play_round(
-            tr: HeartTrick, fst: bool = False, bh: bool = True
-        ) -> Tuple[bool, bool]:
+        def play_round() -> Tuple[bool, bool]:
             boost9: bool = False
+            bh: bool = broken_heart
             for player in po:
                 # p(player.hand)
-                c: CardType = player.play_card(tr, first=fst, broken_heart=bh)
-                tr.append(TrickPlay(c, player))
+                c: CardType = player.play_card(t, first=first, broken_heart=bh)
+                t.append(TrickPlay(c, player))
                 p(f"{player} played {repr(c)}")
                 if c.suit == Suit.HEART and not bh:
                     p("Hearts has been broken!")
                     bh = True
-                if c.suit == tr[0].card.suit and c.rank == Rank.NINE:
+                if c.suit == t[0].card.suit and c.rank == Rank.NINE:
                     p("Boosted 9!")
                     boost9 = True
             return bh, boost9
 
-        repeat: bool = True
-        while repeat:
-            broken_heart, repeat = play_round(t, first, broken_heart)
-            first = False
-            if not t.winner():
-                repeat = True
-                p("No unique winner")
-            if repeat and not lead.hand:  # out of cards
-                repeat = False
-                p("End.")
-
-        # find winner
-        if w := t.winner():
+        w: Optional[TrickPlay] = None
+        while not w:
+            broken_heart, repeat = play_round()
+            w = None if repeat else t.winner()
+            if not lead.hand:  # out of cards
+                break
+        if w:
             lead = w.played_by
+        if self.kitty:  # should only be on the first trick
+            p(f"Plus {self.kitty} from the kitty")
+            lead.current_trick.extend(self.kitty)
+            self.kitty = Hand()  # reset the kitty for the next hand
         lead.tricks_taken.append(t)
+        lead.current_trick.extend(t.cards)
         p(f"{lead} gets the cards.\n")
-        return lead, bool([x for x in t.cards if x.suit == Suit.HEART]), False
+        return lead, broken_heart, False
 
     def play(self):
         v: int = 0
