@@ -484,15 +484,6 @@ class BasePlayer(abc.ABC):
         pass
 
     def play_card(self, trick_in_progress: "TrickType", /, **kwargs,) -> CardType:
-        try:
-            for x in trick_in_progress:
-                self.card_count.remove(x.card)
-        except ValueError:
-            # This works fine with euchre.py
-            # Print is commented out for Hearts
-            # boosted nines create problems with this when playing Hearts
-            # print(f"{self}: {trick_in_progress.cards} not in {self.card_count}")
-            pass
         return self.pick_card(
             follow_suit(  # valid cards
                 trick_in_progress[0].card.suit if trick_in_progress else None,

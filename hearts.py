@@ -180,21 +180,26 @@ class HeartTrick(Trick):
     def points(self) -> int:
         return sum([c.value for c in self.cards])
 
-    def winner(self, is_low: bool = False) -> Optional[TrickPlay]:
-        if not self:
+    def winner(
+        self, is_low: bool = False, purified: bool = False
+    ) -> Optional[TrickPlay]:
+        length: int = len(self)
+        if length == 0:
             p(f"No one won.")
             return None
-        if len(self.cards) == 1:
+        if length == 1:
+            p(f"One winning card.")
             return self[0]
-        fs: List[TrickPlay] = sorted(self.follow_suit(), key=key_heart_trick_sort)
+        if not purified:
+            self.sort(key=key_heart_trick_sort, reverse=is_low)
+            return self.follow_suit().winner(is_low=is_low, purified=True)
         # check for duplicate winners
-        try:
-            if fs[-2].card == fs[-1].card:
-                p(f"No clear winner, trying again.")
-                return HeartTrick([x for x in fs if x.card != fs[-1].card]).winner()
-        except IndexError:
-            p(f"{fs}")  # debugging
-        return fs[-1]
+        if self[-2].card == self[-1].card:
+            p(f"No clear winner, trying again. {self.cards}")
+            return HeartTrick([x for x in self if x.card != self[-1].card]).winner(
+                purified=True
+            )
+        return self[-1]
 
     def follow_suit(
         self, strict: bool = True, ot: "Optional[Type[Trick]]" = None
@@ -273,6 +278,7 @@ class Hearts(BaseGame):
             if el:  # complex to handle duplications and the kitty
                 break
         lead: HeartPlayer = el[0]
+        two_c: HeartPlayer = el[0]
         bh, f = False, True
         # play tricks
         while lead.hand:
@@ -302,6 +308,8 @@ class Hearts(BaseGame):
             sc: int = point_grid[pl]
             pl.score = sc
             p(f"{pl}: {'+' if sc > 0 else ''}{sc} to total {pl.score}")
+        if self.kitty:
+            p(f"({two_c} got {self.kitty} from the kitty)")
         return dealer.next_player
 
     def play_trick(
@@ -320,6 +328,9 @@ class Hearts(BaseGame):
                 c: CardType = player.play_card(t, first=first, broken_heart=bh)
                 t.append(TrickPlay(c, player))
                 p(f"{player} played {repr(c)}")
+                for p2 in po:  # everyone sees the card and adjusts their count
+                    if p2 != player:
+                        p2.card_count.remove(c)
                 if c.suit == Suit.HEART and not bh:
                     p("Hearts has been broken!")
                     bh = True
@@ -336,13 +347,13 @@ class Hearts(BaseGame):
                 break
         if w:
             lead = w.played_by
-        if self.kitty:  # should only be on the first trick
-            p(f"Plus {self.kitty} from the kitty")
+        if first:  # should only be on the first trick
             lead.current_trick.extend(self.kitty)
-            self.kitty = Hand()  # reset the kitty for the next hand
         lead.tricks_taken.append(t)
         lead.current_trick.extend(t.cards)
-        p(f"{lead} gets the cards.\n")
+        p(
+            f"{lead} gets the cards{' plus the kitty' if self.kitty and first else ''}.\n"
+        )
         return lead, broken_heart, False
 
     def play(self):

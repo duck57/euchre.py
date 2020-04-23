@@ -480,39 +480,26 @@ class BidEuchre(BaseGame):
         self, lead: Player, is_low: bool = False, lone: Optional[Player] = None
     ) -> Player:
         pl: Player = lead
-        po: List[Player] = []
+        po: List[Player] = get_play_order(lead)
         trick_in_progress: Trick = Trick()
 
         # play the cards
-        while pl not in po:
+        for pl in po:
             if lone and pl in lone.teammates:
-                pl = pl.next_player
                 continue
-            trick_in_progress.append(
-                TrickPlay(
-                    pl.play_card(
-                        trick_in_progress,
-                        handedness=self.handedness,
-                        is_low=is_low,
-                        broken_suits=self.suit_safety,
-                        trump=self.trump,
-                    ),
-                    pl,
-                )
+            c: Card = pl.play_card(
+                trick_in_progress,
+                handedness=self.handedness,
+                is_low=is_low,
+                broken_suits=self.suit_safety,
+                trump=self.trump,
             )
-            p(f"{pl.name} played {repr(trick_in_progress[-1].card)}")
-            po.append(pl)
-            pl = pl.next_player
-
-        # deal with card counting
-        for i in range(len(trick_in_progress)):
-            for j in range(i + 1, len(po)):
-                try:
-                    trick_in_progress[i].played_by.card_count.remove(
-                        trick_in_progress[j].card
-                    )
-                except ValueError:
-                    p((trick_in_progress[j].card, trick_in_progress[i].played_by))
+            trick_in_progress.append(TrickPlay(c, pl))
+            p(f"{pl.name} played {repr(c)}")
+            # deal with card counting
+            for p2 in self.players:
+                if p2 != pl:
+                    p2.card_count.remove(c)
 
         # find the winner
         w: TrickPlay = trick_in_progress.winner(is_low)
