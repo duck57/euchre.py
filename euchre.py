@@ -38,12 +38,12 @@ def px(msg) -> None:
         p(msg)
 
 
-class Player(BasePlayer, abc.ABC):
+class EuchrePlayer(BasePlayer, abc.ABC):
     desired_trump: Bid
     shoot_strength: int
 
-    def __init__(self, name: str, bot: int = 1, deck=None):
-        super().__init__(name, bot, deck)
+    def __init__(self, g: "GameType", /, name: str, **kwargs):
+        super().__init__(g, name)
         self.tricks: int = 0
         self.bid_estimates: Dict[Bid, int] = {}
         self.reset_bids()
@@ -63,7 +63,7 @@ class Player(BasePlayer, abc.ABC):
         d: Hand,
         handedness: int,
         min_bid: int = 0,
-        leading_player: "Optional[Player]" = None,
+        leading_player: "Optional[EuchrePlayer]" = None,
     ) -> int:
         pass
 
@@ -72,7 +72,6 @@ class Player(BasePlayer, abc.ABC):
         if trump_suit:
             self.hand.trumpify(trump_suit)
         self.sort_hand(is_lo)
-        self.card_count = self.reset_unplayed(ts=trump_suit)
 
     def receive_shooter(self, handedness: int, bid: Bid) -> None:
         for pl in self.teammates:
@@ -82,9 +81,10 @@ class Player(BasePlayer, abc.ABC):
         self.sort_hand(bid.is_low)
 
 
-class HumanPlayer(BaseHuman, Player):
-    def __init__(self, name, deck=None):
-        super().__init__(name, 0, deck)
+class HumanPlayer(BaseHuman, EuchrePlayer):
+    def __init__(self, g: "GameType", /, name: str):
+        BaseHuman.__init__(self, g, name)
+        EuchrePlayer.__init__(self, g, name, is_bot=0)
 
     @property
     def choose_trump(self) -> Bid:
@@ -102,7 +102,7 @@ class HumanPlayer(BaseHuman, Player):
         d: Hand,
         handedness: int,
         min_bid: int = 0,
-        leading_player: "Optional[Player]" = None,
+        leading_player: "Optional[EuchrePlayer]" = None,
     ) -> int:
         self.hand.sort(key=key_display4human)
         p(self.hand)
@@ -116,11 +116,12 @@ class HumanPlayer(BaseHuman, Player):
         )
 
 
-class ComputerPlayer(BaseComputer, Player):
+class ComputerPlayer(BaseComputer, EuchrePlayer):
     sort_key = key_trump_power
 
-    def __init__(self, name, deck=None):
-        super().__init__(name, 1, deck)
+    def __init__(self, g: "GameType", /, name: str):
+        BaseComputer.__init__(self, g, name)
+        EuchrePlayer.__init__(self, g, name)
 
     def make_bid(
         self,
@@ -128,7 +129,7 @@ class ComputerPlayer(BaseComputer, Player):
         d: Hand,
         handedness: int,
         min_bid: int = 0,
-        leading_player: "Optional[Player]" = None,
+        leading_player: "Optional[EuchrePlayer]" = None,
     ) -> int:
         if max(self.bid_estimates.values()) == 0:
             # simulate a hand
@@ -221,15 +222,6 @@ class ComputerPlayer(BaseComputer, Player):
                 return random.choice(junk_cards)
             return random.choice(w)
         return random.choice(junk_cards)
-
-    def play_card(self, trick_in_progress: "Trick", /, **kwargs,) -> Card:
-        """
-        This is necessary so that cards aren't double-played by CPU players
-        Humans pop a raw index, but a card needs to be removed manually for computers
-        """
-        c: Card = super().play_card(trick_in_progress, **kwargs)
-        self.hand.remove(c)
-        return c
 
     def simulate_hand(self, *, h_p: Hand, d_p: Hand, t: Bid, **kwargs) -> int:
         def slice_by_suit(h: Hand, s: Suit) -> Hand:
@@ -354,11 +346,11 @@ class BidEuchre(BaseGame):
             self.mercy_rule: int = c["Scores"].getint("mercy")
             self.bad_ai_end: int = c["Scores"].getint("broken_ai")
 
-    def bidding(self, bid_order: List[Player]) -> Player:
+    def bidding(self, bid_order: List[EuchrePlayer]) -> EuchrePlayer:
         first_round: bool = True
         count: int = 1
         hands: int = len(bid_order)
-        wp: Optional[Player] = None
+        wp: Optional[EuchrePlayer] = None
         wb: int = 0
         bid_order = cycle(bid_order)
         min_bid: int = min(self.valid_bids)
@@ -403,12 +395,12 @@ class BidEuchre(BaseGame):
         wp.team.bid = wb
         return wp
 
-    def play_hand(self, dealer: Player) -> Player:
+    def play_hand(self, dealer: EuchrePlayer) -> EuchrePlayer:
         self.deal()
         hn: int = len(dealer.team.score_changes) + 1
         p(f"\nHand {hn}")
         p(f"Dealer: {dealer}")
-        po: List[Player] = get_play_order(dealer)
+        po: List[EuchrePlayer] = get_play_order(dealer)
         po.append(po.pop(0))  # because the dealer doesn't lead bidding
 
         # deal the cards
@@ -417,7 +409,7 @@ class BidEuchre(BaseGame):
             pl.reset_bids()
 
         # bidding
-        lead: Player = self.bidding(po)
+        lead: EuchrePlayer = self.bidding(po)
 
         # declare Trump
         trump: Bid = lead.choose_trump
@@ -426,10 +418,11 @@ class BidEuchre(BaseGame):
 
         # modify hands if trump called
         [player.trumpify_hand(trump.trump_suit, trump.is_low) for player in po]
+        self.unplayed_cards.trumpify(trump.trump_suit)  # for card-counting
         self.suit_safety[trump.trump_suit] = None
 
         # check for shooters and loners
-        lone: Optional[Player] = None
+        lone: Optional[EuchrePlayer] = None
         if lead.team.bid > self.hand_size:
             if lead.team.bid < 2 * self.hand_size:
                 lead.receive_shooter(self.handedness, trump)
@@ -476,10 +469,13 @@ class BidEuchre(BaseGame):
         return dealer.next_player
 
     def play_trick(
-        self, lead: Player, is_low: bool = False, lone: Optional[Player] = None
-    ) -> Player:
-        pl: Player = lead
-        po: List[Player] = get_play_order(lead)
+        self,
+        lead: EuchrePlayer,
+        is_low: bool = False,
+        lone: Optional[EuchrePlayer] = None,
+    ) -> EuchrePlayer:
+        pl: EuchrePlayer = lead
+        po: List[EuchrePlayer] = get_play_order(lead)
         trick_in_progress: Trick = Trick()
 
         # play the cards
@@ -495,10 +491,6 @@ class BidEuchre(BaseGame):
             )
             trick_in_progress.append(TrickPlay(c, pl))
             p(f"{pl.name} played {repr(c)}")
-            # deal with card counting
-            for p2 in self.players:
-                if p2 != pl:
-                    p2.card_count.remove(c)
 
         # find the winner
         w: TrickPlay = trick_in_progress.winner(is_low)
@@ -644,7 +636,7 @@ def main(
     player_handles: List[str] = {
         3: ["Alice", "Bob", "Charlie"],
         4: ["North", "East", "South", "West"],
-        6: ["Richard", "Abbott", "Gallagher", "Mortimer", "Costello", "Alice"],
+        6: ["Richard", "Abbott", "Gallagher", "Mortimer", "Costello", "Millhouse"],
         8: [
             "Nelson",
             "Mortimer",
@@ -658,7 +650,7 @@ def main(
     }[hands]
     if len(humans) == 1 and humans[0] < hands:
         player_handles[humans[0]] = "Human"
-    p_types: List[Type[Player]] = [ComputerPlayer for _ in range(handedness)]
+    p_types: List[Type[EuchrePlayer]] = [ComputerPlayer for _ in range(handedness)]
     for n in humans:
         if n < len(p_types):
             p_types[n] = HumanPlayer

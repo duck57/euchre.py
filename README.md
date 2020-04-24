@@ -27,18 +27,23 @@ Notable differences (to match how I learned in high school calculus) include:
 * Running `euchre.py` without options plays a 4-handed game with one human player in a random seat
 * There is a walrus or two, so Python 3.8 is required
 
+# Hearts
+
+See `hearts.py --help` for all the options.
+It supports something like MS Hearts.exe and two Spot Hearts variants.
+
 # Future Plans
 
-### Hearts?
-
-Hearts may be in the cards for the future.  The major obstacle to implementing
-Hearts is thinking of an algorithm for the computer players, especially
-deciding when to shoot the moon or not and preventing other players from
-successful moonshots.
-
-Implementing the code for shooters made it the obvious next game.  Doing so
-will require a refactor and some class inheritance for `Game` and `Player`.
+Python 3.9's upcoming `a | b` syntax for merging dictionaries may be helpful.
 
 ### Bridge
 
+This needs someone else who is familiar with the rules to implement it or a variant
+
+### Spades
+
+See Bridge.
+
 ### Single-Deck Euchre
+
+Maybe I'll get around to this one eventually.

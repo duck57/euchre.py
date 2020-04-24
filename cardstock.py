@@ -57,14 +57,12 @@ def p0(*msg):
 def make_players(
     handles: List[str],
     player_type: "Union[Iterable[Type[PlayerType]], Type[PlayerType]]",
-    deck: "Hand",
+    calling_game: "GameType",
 ) -> "List[PlayerType]":
-    c = configparser.ConfigParser()
-    c.read("players.cfg")
     if not isinstance(player_type, Iterable):
         player_type = {player_type}
     player_type = cycle(player_type)
-    return [pt(h, deck) for pt, h in zip(player_type, handles)]
+    return [pt(calling_game, h) for pt, h in zip(player_type, handles)]
 
 
 class Color:
@@ -361,6 +359,10 @@ class Hand(List[CardType]):
     def point_free(self) -> "Hand":
         return Hand(c for c in self if c.value < 1)
 
+    @property
+    def pcv(self) -> int:
+        return self.pointable.points
+
 
 def make_deck(r: List[Rank], s: List[Suit], c: Type[Cardstock] = Card) -> Hand:
     return Hand(c(rank, suit) for rank in r for suit in s)
@@ -468,16 +470,27 @@ class BasePlayer(abc.ABC):
     previous_player: "PlayerType"
     opposite_player: "Optional[PlayerType]" = None
 
-    def __init__(self, name: str, bot: int = 1, deck: Optional[Hand] = None):
-        if not deck:
-            deck = Hand()
+    def __init__(self, g: "GameType", /, name: str, bot: int = 1):
         self.name: str = name
         self.is_bot: int = bot
-        self.hand: Hand = Hand()
-        self.deck: Hand = deepcopy(deck)
-        self.card_count: Hand = deepcopy(deck)
+        self.hand = Hand()
+        self.in_game: GameType = g  # allow access to the game in which you're playing
         self.tricks_taken: List[Hand] = []
         self.sort_key: Callable[[CardType], int] = key_display4human
+
+    @property
+    def deck(self) -> Hand:
+        return self.in_game.deck
+
+    @property
+    def card_count(self) -> Hand:
+        """
+        :return: list of remaining cards to be played
+        """
+        o = deepcopy(self.in_game.unplayed_cards)
+        for c in self.hand:
+            o.remove(c)
+        return o
 
     def __str__(self):
         return f"{self.name}"
@@ -492,21 +505,26 @@ class BasePlayer(abc.ABC):
         pass
 
     def play_card(self, trick_in_progress: "TrickType", /, **kwargs,) -> CardType:
-        return self.pick_card(
+        vr: Optional[Rank] = kwargs.get("valid_rank")
+        c: CardType = self.pick_card(
             follow_suit(  # valid cards
-                trick_in_progress.lead_suit if trick_in_progress else None,
-                self.hand,
+                trick_in_progress.lead_suit
+                if trick_in_progress
+                else kwargs.get("force_suit"),
+                Hand(c for c in self.hand if c.rank == vr) if vr else self.hand,
                 strict=None,
-                allow_heart=kwargs.get("hearts_ok", True),
                 allow_points=kwargs.get("points_ok", True),
                 ok_empty=False,
             ),
-            full_hand=self.hand,  # your hand
             trick_in_progress=trick_in_progress,  # current trick
-            pl=self,
-            unplayed=self.card_count,
             **kwargs,  # any other useful info
         )
+        # below line is for debugging trump calls
+        # print(c, self.in_game.played_cards, self.in_game.unplayed_cards)
+        self.in_game.played_cards.append(c)
+        self.in_game.unplayed_cards.remove(c)
+        self.hand.remove(c)
+        return c
 
     @property
     def teammates(self) -> "Set[PlayerType]":
@@ -515,9 +533,9 @@ class BasePlayer(abc.ABC):
     def send_shooter(
         self, cards: int, p_word: str = "send", prompt="Send a card to your friend."
     ) -> List[Card]:
-        if not cards:
+        if not cards or not self.hand:
             return []
-        out = (
+        out: List[CardType] = (
             self.hand[-cards:]
             if self.is_bot
             else [
@@ -525,12 +543,8 @@ class BasePlayer(abc.ABC):
                 for _ in range(cards)
             ]
         )
-        self.card_count += out
         for c in out:
-            try:
-                self.hand.remove(c)
-            except ValueError:
-                print(f"{self}: {c} not found in {self.hand}")
+            self.hand.remove(c)
         return out
 
     def sort_hand(self, is_low: bool = False) -> None:
@@ -543,18 +557,6 @@ class BasePlayer(abc.ABC):
     def receive_cards(self, cards_in: Iterable[CardType]) -> None:
         self.hand += cards_in
         self.sort_hand()
-        # print(self, cards_in, "\n", self.card_count)
-        for c in cards_in:
-            self.card_count.remove(c)
-
-    def reset_unplayed(self, ts: Optional[Suit] = None) -> Hand:
-        dk: Hand = deepcopy(self.deck)
-        dk.trumpify(ts)
-        dk.sort(key=key_display4human)
-        for card in self.hand:
-            dk.remove(card)
-        self.card_count = dk
-        return dk
 
     def pass_left(self, c: Union[CardType, List[CardType]]) -> None:
         self.next_player.receive_cards(list(c))
@@ -585,10 +587,14 @@ def get_play_order(lead: PlayerType) -> List[PlayerType]:
 
 
 class BaseComputer(BasePlayer, abc.ABC):
-    pass
+    def __init__(self, g: "GameType", /, name: str, **kwargs):
+        BasePlayer.__init__(self, g, name, 1)
 
 
 class BaseHuman(BasePlayer, abc.ABC):
+    def __init__(self, g: "GameType", /, name: str, **kwargs):
+        BasePlayer.__init__(self, g, name, 0)
+
     def pick_card(self, valid_cards: Hand, **kwargs,) -> CardType:
         trick_in_progress = kwargs.get("trick_in_progress")
         if not trick_in_progress:
@@ -658,7 +664,6 @@ def deal(
             players[i].hand = h
         else:
             players[i].hand += h
-        players[i].reset_unplayed()
     return kitty
 
 
@@ -672,20 +677,18 @@ class BaseGame(abc.ABC):
         deck_generator: Callable[[Type[Cardstock]], Hand],
         team_type: Type[BaseTeam],
         victory_threshold: int,
-        start: str = str(datetime.now()).split(".")[0],
+        **kwargs,
     ):
         # constants
         self.victory_threshold = victory_threshold
-        self.start_time: str = start
+        self.start_time: str = kwargs.get("start", str(datetime.now()).split(".")[0])
         # make the deck
         self.kitty: Hand[CardType] = Hand()
         self.deck: Hand[CardType] = deck_generator(card_type)
         self.suit_safety: Dict[Suit, Union[None, bool, TeamType, PlayerType]] = {}
         self.reset_suit_safety()
         # create players and teams
-        self.players: List[PlayerType] = make_players(
-            player_names, player_types, self.deck,
-        )
+        self.players: List[PlayerType] = make_players(player_names, player_types, self)
         self.handedness: int = len(self.players)
         assert (
             self.handedness % team_size == 0 and self.handedness // team_size > 1
@@ -704,19 +707,35 @@ class BaseGame(abc.ABC):
                 if self.handedness % 2 == 0
                 else None
             )
-            self.players[i].deck = deepcopy(self.deck)
         # initial dealer for 4-hands should be South
         self.current_dealer: PlayerType = self.players[2]
+        self.played_cards = Hand()
+        self.unplayed_cards = Hand()
+        self.minimum_kitty_size: int = kwargs.get("kitty_minimum", 0)
+        self.shuffle_deck: bool = kwargs.get("shuffle_deck", True)
 
     def reset_suit_safety(self) -> None:
         self.suit_safety = {s: False for s in suits}
 
     def deal(
-        self, minimum_kitty_size: int = 0, shuffled: bool = True
+        self, *, minimum_kitty_size: int = None, shuffled: bool = None, **kwargs,
     ) -> Hand[CardType]:
+
+        # kwargs nonsense
+        if minimum_kitty_size is None:
+            minimum_kitty_size = self.minimum_kitty_size
+        if shuffled is None:
+            shuffled = self.shuffle_deck
+
+        # actually deal
         self.kitty = deal(self.players, self.deck, minimum_kitty_size, shuffled, True)
+
+        # stuff for card counting
         self.reset_suit_safety()
-        # print([f"{p} {p.card_count}" for p in self.players])
+        self.played_cards = Hand()
+        self.unplayed_cards = deepcopy(self.deck)
+
+        # we're all done!
         return self.kitty
 
     @abc.abstractmethod
@@ -829,7 +848,7 @@ def is_prime(n: int):
 
 def pass_cards(
     playlist: List[PlayerType], directions: List[Callable], kitty: Hand,
-) -> None:
+) -> Hand:
     if pass_kitty in directions:
         return pass_kitty(playlist, kitty, len(directions))
     where_to: List[Tuple[PlayerType, Callable]] = [
@@ -842,6 +861,8 @@ def pass_cards(
     # pass the cards
     for i in range(len(cards)):
         getattr(where_to[i][0], where_to[i][1].__name__)(cards[i])
+    # should be a clean pass-through, added for simpler function signature
+    return kitty
 
 
 def pass_kitty(
@@ -849,10 +870,11 @@ def pass_kitty(
     kitty: Hand,
     strength: int = 3,
     minimum_kitty_size: int = 0,
-) -> None:
+) -> Hand:
     for p in playlist:
         kitty += p.send_shooter(strength)
     kitty = deal(playlist, kitty, replace=False, minimum_kitty_size=minimum_kitty_size)
+    return kitty
 
 
 pass_left = BasePlayer.pass_left
@@ -870,3 +892,19 @@ pass_order_all = [
 pass_order_ms_hearts_exe = pass_order_all[:-1]
 pass_order_no_hold_even = pass_order_all[:3]
 pass_order_no_hold_odd = pass_order_all[:2]
+
+
+def pass_n(p: Callable, /) -> str:
+    return p.__name__.split("_")[-1]
+
+
+def pass2s(p: Callable, /) -> str:
+    if p == pass_hold:
+        return "to yourself"
+    return ("" if p == pass_across else "to the ") + pass_n(p)
+
+
+def pass_choice_display_list(pc: List[Callable], /) -> Dict[Union[str, chr], Callable]:
+    long: Dict[str, Callable] = {pass_n(p): p for p in pc}
+    s: Dict[chr, Callable] = {k[0]: long[k] for k in long}
+    return {**long, **s}
