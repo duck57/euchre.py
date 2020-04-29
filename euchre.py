@@ -41,8 +41,8 @@ def px(msg) -> None:
 class EuchrePlayer(BasePlayer, abc.ABC):
     desired_trump: Bid
 
-    def __init__(self, g: "GameType", /, name: str, **kwargs):
-        super().__init__(g, name)
+    def __init__(self, g: "GameType", /, name: str, is_bot: int = 1, **kwargs):
+        super().__init__(g, name, is_bot)
         self.tricks: int = 0
         self.bid_estimates: Dict[Bid, int] = {}
         self.reset_bids()
@@ -88,7 +88,7 @@ class EuchrePlayer(BasePlayer, abc.ABC):
 class HumanPlayer(BaseHuman, EuchrePlayer):
     def __init__(self, g: "GameType", /, name: str):
         BaseHuman.__init__(self, g, name)
-        EuchrePlayer.__init__(self, g, name, is_bot=0)
+        EuchrePlayer.__init__(self, g, name, 0)
 
     @property
     def choose_trump(self) -> Bid:
@@ -123,7 +123,7 @@ class ComputerPlayer(BaseComputer, EuchrePlayer):
 
     def __init__(self, g: "GameType", /, name: str):
         BaseComputer.__init__(self, g, name)
-        EuchrePlayer.__init__(self, g, name)
+        EuchrePlayer.__init__(self, g, name, 1)
 
     def make_bid(
         self,

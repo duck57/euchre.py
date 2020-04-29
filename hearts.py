@@ -87,8 +87,8 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
     right: "HeartPlayer"
     across: "HeartPlayer"
 
-    def __init__(self, g: "GameType", /, name: str):
-        BasePlayer.__init__(self, g, name)
+    def __init__(self, g: "GameType", /, name: str, is_bot: int = 1):
+        BasePlayer.__init__(self, g, name, is_bot)
         WithScore.__init__(self)
         self.trick_history: List[Hand] = []
 
@@ -144,22 +144,6 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
         first_trick: bool = kwargs.get("first", False)
         lead: bool = not trick_in_progress
         broken_heart: bool = kwargs.get("broken_heart", True)
-        # p(
-        #     "\t".join(
-        #         [
-        #             " ".join(["First", "trick?", first_trick]),
-        #             " ".join(["Heartbreak?", broken_heart]),
-        #             " ".join(["Lead", lead]),
-        #             " ".join(
-        #                 [
-        #                     "Points",
-        #                     "ok?",
-        #                     self.allow_points(first_trick, broken_heart, lead),
-        #                 ]
-        #             ),
-        #         ]
-        #     )
-        # )
         return super().play_card(
             trick_in_progress,
             points_ok=self.allow_points(first_trick, broken_heart, lead),
@@ -247,6 +231,10 @@ def key_score(pl: WithScore):
 
 
 class HumanPlayer(HeartPlayer, BaseHuman):
+    def __init__(self, g: "GameType", /, name: str):
+        HeartPlayer.__init__(self, g, name, 0)
+        BaseHuman.__init__(self, g, name)
+
     def pick_pass(self, vp_list: List[Callable], **kwargs) -> Callable:
         if len(vp_list) == 1:  # don't bother users if they can't make a choice
             return vp_list[0]
@@ -390,7 +378,7 @@ class Hearts(BaseGame):
             self.valid_calls = [pass_left, pass_right]
             if not self.handedness % 2:
                 self.valid_calls.append(pass_across)
-            if no_hold:
+            if not no_hold:
                 self.valid_calls.append(pass_hold)
             if allow_kitty or allow_kitty is None and deck_type == DirtHeartCard:
                 self.valid_calls.append(pass_kitty)
@@ -514,7 +502,7 @@ class Hearts(BaseGame):
     ) -> Tuple[HeartPlayer, bool, bool, None]:
         po: List[HeartPlayer] = get_play_order(lead)
         t = HeartTrick()
-        p(f"{lead} starts")
+        p(f"\n{lead} starts")
 
         # play cards
         def play_round() -> Tuple[bool, bool]:
@@ -649,12 +637,12 @@ class Hearts(BaseGame):
 )
 @click.option(
     "--call-passes",
-    "custom_call_pass",
+    "custom_calls_enabled",
     type=click.BOOL,
     help="Players call their own pass rules for each hand",
 )
 @click.option(
-    "--unify-passing", "up", type=click.BOOL, help="Prohibit split pass calls",
+    "--unify-passing", type=click.BOOL, help="Prohibit split pass calls",
 )
 @click.option(
     "--game",

@@ -501,12 +501,23 @@ class WithScore:
         self.score_changes: List[int] = []
 
     @property
-    def score(self):
+    def score(self) -> int:
         return sum(self.score_changes)
 
     @score.setter
     def score(self, value: int):
         self.score_changes.append(value)
+
+    @abc.abstractmethod
+    def hand_tab(self, hand: Optional[int], tab: str = "\t") -> str:
+        """
+        :param hand: hand number
+        :param tab: separator
+        :return: an expanded list of score changes for the hand
+        """
+        if hand is None:
+            return str(self.score)
+        return str(self.score_changes[hand])
 
 
 class MakesBid:
@@ -665,6 +676,21 @@ class BaseHuman(BasePlayer, abc.ABC):
             )
         ]
 
+    def receive_cards(
+        self,
+        cards_in: Iterable[CardType],
+        /,
+        *,
+        sort_low: bool = False,
+        from_player: Optional[PlayerType] = None,
+        **kwargs,
+    ) -> None:
+        super(BaseHuman, self).receive_cards(cards_in, sort_low=sort_low, **kwargs)
+        summary: str = f"Received {Hand(cards_in)}"
+        if from_player:
+            summary += f" from {from_player}"
+        print(summary)
+
 
 class BaseTeam:
     def __init__(self, players: "Iterable[PlayerType]"):
@@ -704,14 +730,16 @@ def deal(
     if shuffled:
         random.shuffle(deck)
     k_size: int = minimum_kitty_size + (deck_size - minimum_kitty_size) % handedness
-    k_dex: Optional[int] = deck_size if k_size == 0 else -k_size
+    k_dex: int = deck_size if k_size == 0 else -k_size
     kitty: Hand = Hand(deck[k_dex:])
     for i in range(handedness):
+        p: PlayerType = players[i]
         h: Hand = deepcopy(Hand(deck[i:k_dex:handedness][:fixed_hand_size]))
         if replace:
-            players[i].hand = h
+            p.hand = h
         else:
-            players[i].hand += h
+            p.hand += h
+        p.sort_hand()
     return kitty
 
 
@@ -803,9 +831,12 @@ def add_options(func, *options):
 
 
 def make_and_play_game(
-    game: "Type[BaseGame]", logging_directory: Optional[str], **kwargs
+    game: "Type[BaseGame]",
+    logging_directory: Optional[str],
+    start_time: Optional[str] = None,
+    **kwargs,
 ):
-    start_time = kwargs.get("start_time", str(datetime.now()).split(".")[0])
+    start_time = start_time if start_time else now()
     g = game(start=start_time, **kwargs)
     g.play()
     g.write_log(logging_directory)
@@ -827,12 +858,14 @@ class BaseGame(abc.ABC):
         handedness: int = 4,
         team_size: int = 1,
         points: int,
+        fixed_hand_size: Optional[int] = None,
         start: str = now(),
         pass_size: int = None,
         add_jokers: int = None,
         minimum_kitty_size: int = 0,
         minimum_hand_size: int = 10,
         deck_replication: int = 1,
+        single_human_name: str = "You",
         all_bots: bool = False,
         humans: List[int] = None,
         shuffle_deck: bool = True,
@@ -854,9 +887,11 @@ class BaseGame(abc.ABC):
         :param handedness: number of players in the game
         :param team_size: number of players on each team
         :param points: victory threshold
+        :param single_human_name: the name override for games with one human player
         :param start: string of game start time, used for logging
         :param pass_size: number of cards to pass in passing games
         :param add_jokers: number of jokers to add to the deck
+        :param fixed_hand_size: fix hand size instead of dealing all available cards
         :param minimum_kitty_size: minimum number of leftover cards on each deal
         :param minimum_hand_size: minimum hand size, determines deck replication
         :param deck_replication: at least this many copies of the deck are created
@@ -920,10 +955,10 @@ class BaseGame(abc.ABC):
         )
 
         # calculate hand sizes and card counts
-        self.hand_size: int = fhs if (fhs := kwargs.get("fixed_hand_size")) else len(
-            self.deck
+        self.hand_size: int = fixed_hand_size if fixed_hand_size else (
+            len(self.deck) - self.minimum_kitty_size
         ) // self.handedness
-        self.fhs: Optional[int] = fhs
+        self.fhs: Optional[int] = fixed_hand_size
         self.suit_safety: Dict[Suit, Union[None, bool, TeamType, PlayerType]] = {}
         self.reset_suit_safety()
 
@@ -950,7 +985,7 @@ class BaseGame(abc.ABC):
         if all_bots:
             humans = []
         if len(humans) == 1 and humans[0] < self.handedness:
-            player_names[humans[0]] = kwargs.get("single_human_name", "You")
+            player_names[humans[0]] = single_human_name if single_human_name else "You"
         self.players: List[PlayerType] = make_players(
             player_names,
             [
@@ -1030,7 +1065,7 @@ class BaseGame(abc.ABC):
 
     @abc.abstractmethod
     def write_log(self, ld: str, splitter: str = "\t|\t") -> None:
-        stop_time: str = str(datetime.now()).split(".")[0]
+        stop_time: str = now()
         f: TextIO = open(os.path.join(ld, f"{self.start_time}.gamelog"), "w")
         t_l: List[BaseTeam] = list(self.teams)  # give a consistent ordering
 
@@ -1164,12 +1199,16 @@ class PassPacket:
 
     def collect_card(self) -> CardType:
         self.card = self.from_player.send_shooter(
-            1, self.direction.__name__.replace("_", " ")
+            1,
+            p_word=self.direction.__name__.replace("_", " "),
+            prompt=f"Send a card to {self.to_player}",
         )[0]
         return self.card
 
     def send_card(self) -> None:
-        self.to_player.receive_cards([self.card], sort_low=self.low_sort)
+        self.to_player.receive_cards(
+            [self.card], sort_low=self.low_sort, from_player=self.from_player
+        )
 
 
 class PassList(List[PassPacket]):
@@ -1224,7 +1263,7 @@ def pass_kitty(
     minimum_kitty_size: int = 0,
 ) -> Hand:
     for p in playlist:
-        kitty += p.send_shooter(strength)
+        kitty += p.send_shooter(strength, prompt="Send a card to the kitty.")
     kitty = deal(playlist, kitty, replace=False, minimum_kitty_size=minimum_kitty_size)
     return kitty
 
