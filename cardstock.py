@@ -278,6 +278,9 @@ class Trick(List[TrickPlay]):
                 w = cpt
         return w
 
+    def winning_card(self, is_low: bool = False) -> CardType:
+        return self.winner(is_low).card
+
     def __add__(self, other):
         if isinstance(other, Iterable):
             self.extend(other)

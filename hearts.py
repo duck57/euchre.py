@@ -102,10 +102,10 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
             return False
         return True
 
-    @property
-    def can_moonshot(self, **kwargs) -> bool:
-        k: int = kwargs.get("kitty_size", 0)
-        h: int = kwargs.get("handedness", 4 - k)
+    def can_moonshot(
+        self, *, current_trick: "Optional[HeartTrick]" = None, **kwargs
+    ) -> bool:
+        k: int = len(self.in_game.kitty)
         deck_total: int = self.deck.pcv
         my_points: Dict[str, int] = {
             "my cards": self.hand.pcv,
@@ -115,14 +115,35 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
         }
         # assume the best cards are in the kitty
         # look at the current trick
-        if ct := kwargs.get("current_trick"):
-            cont, this = self.can_win_this_trick(ct)
+        if current_trick:
+            cont, this = self.can_win_this_trick(current_trick)
             if not cont:
                 return False
-            my_points["this trick"] = ct.cards.pcv
+            my_points["this trick"] = current_trick.cards.pcv
         # can't look at kitty cards until the end of the hand
         # otherwise total the tricks you've already taken
-        return sum(my_points.values()) >= deck_total
+        if sum(my_points.values()) < deck_total:
+            return False
+        # simulate playing the rest of the game
+        cc: Hand = self.card_count
+        cc.sort(key=key_rank_first, reverse=True)
+        if not (points_remaining := cc.pcv):
+            return True
+        points_possible: int = 0
+        for c in sorted(self.hand, key=key_rank_first, reverse=True):
+            t = Trick([TrickPlay(c, self)])
+            for _ in range(self.in_game.handedness - 1):
+                if not cc:
+                    break
+                if can_beat_trick(t, cc):
+                    t.append(TrickPlay(cc.pop(0), self))
+                else:
+                    x = follow_suit(t.lead_suit, cc)[-1]
+                    t.append(TrickPlay(x, self))
+                    cc.remove(x)
+            if t.winning_card() == c:
+                points_possible += t.cards.pcv
+        return points_possible >= points_remaining
 
     def can_win_this_trick(
         self, t: "HeartTrick", /, *, valid_leads: Optional[Hand] = None
@@ -133,11 +154,8 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
         :param t: the trick in question
         :return: whether you can win it and the expected point change
         """
-        if not valid_leads:
-            valid_leads = self.hand
-        if not t:
-            return True, 0
-        return False, 0
+        m = can_beat_trick(t, self.hand)
+        return bool(m), t.points + m[0].value if m else 0
 
     def play_card(self, trick_in_progress: "TrickType", /, **kwargs,) -> CardType:
         # p(f"{trick_in_progress} {kwargs}")
@@ -173,7 +191,7 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
         return tab.join(
             [
                 str(self.trt(hand)),
-                str(self.score_changes[hand] if hand else self.score),
+                str(self.score if hand is None else self.score_changes[hand]),
             ]
         )
 
@@ -198,7 +216,7 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
         if current_stack:
             if current_stack[-1] in [pass_hold, pass_kitty] or one_direction:
                 valid_passes = [current_stack[-1]]  # hold ends card selection
-                one_direction = True  # autofill the rest of the slots
+                one_direction = True  # auto-fill the rest of the slots
             else:  # kitty can only be called on the first card
                 valid_passes = [v for v in valid_passes if v != pass_kitty]
         else:
@@ -220,7 +238,20 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
         return random.choice(vp_list)
 
 
+def can_beat_trick(t: Trick, h: Hand) -> Hand:
+    if not t:
+        # don't check if you have lead, that's for some other function
+        return h
+    if not (fs := follow_suit(t.lead_suit, h, strict=True, ok_empty=True)):
+        # nothing follows suit
+        return fs
+    return Hand(c for c in fs if c.rank > t.winning_card().rank)
+
+
 class HeartTeam(BaseTeam, WithScore):
+    def hand_tab(self, hand: Optional[int], tab: str = "\t") -> str:
+        pass
+
     @property
     def score(self):
         return sum(pl.score for pl in self.players)
@@ -256,10 +287,66 @@ class HumanPlayer(HeartPlayer, BaseHuman):
 class ComputerPlayer(HeartPlayer, BaseComputer):
     sort_key = key_points
 
-    def pick_card(self, valid_cards: Hand, **kwargs):
-        # TODO make me smarter
-        c: CardType = valid_cards[-1]
-        return c
+    def pick_card(
+        self,
+        valid_cards: Hand,
+        trick_in_progress: "Optional[HeartTrick]" = None,
+        **kwargs,
+    ):
+        """
+        Assumes valid_cards is sorted from least to greatest rank
+        If it feels that it can shoot the moon, it plays high, otherwise it goes low
+        """
+        valid_cards.sort(key=key_rank_first)
+        # check if you can moonshot
+        if self.can_moonshot(current_trick=trick_in_progress):
+            return random.choice(
+                [c for c in valid_cards if c.rank == valid_cards[-1].rank]
+            )
+        # picking a card to follow
+        if trick_in_progress:
+            take_trick: Hand = can_beat_trick(trick_in_progress, valid_cards)
+            dump_cards = Hand(c for c in valid_cards if c not in take_trick)
+            can_follow_suit: bool = valid_cards[0].follows_suit(
+                trick_in_progress.lead_suit
+            )
+            point_ahead_winners = Hand(
+                c for c in take_trick if c.value <= -trick_in_progress.points
+            )
+            # grab negative (or zero) points when it is safe to do so
+            if point_ahead_winners:
+                # no remaining point cards
+                # or you come out ahead even if you get some more point cards
+                if Hand(
+                    sorted(self.card_count.pointable, key=key_points)[
+                        -(self.in_game.handedness - len(trick_in_progress) - 1) :
+                    ]
+                ).points <= abs(trick_in_progress.points):
+                    return random.choice(point_ahead_winners)
+                # you are the last player for the trick
+                if len(trick_in_progress) == self.in_game.handedness - 1:
+                    return random.choice(point_ahead_winners)
+            # see if you can dump point cards on another suit
+            if not can_follow_suit and dump_cards.pointable:
+                # dump big guns first
+                if big_cards := Hand(c for c in dump_cards.pointable if c.value > 9):
+                    return random.choice(big_cards)
+                return random.choice(dump_cards.pointable)
+            # try the biggest card that won't take the trick
+            if dump_cards:
+                return dump_cards[-1]
+            # you may be expected to take the trick
+            return sorted(valid_cards, key=key_points)[0]
+
+        # choose a lead (but you can't moonshot anymore)
+        if self.card_count.pcv < 1:
+            # only point-free cards remain
+            # go big
+            return valid_cards[-1]
+        # take something reasonably small
+        return random.choice(
+            [c for c in valid_cards if c.rank.v <= valid_cards[0].rank.v]
+        )
 
     @staticmethod
     def pick_pass(vp_list: List[Callable], **kwargs) -> Callable:
@@ -276,25 +363,33 @@ class HeartTrick(Trick):
         return sum([c.value for c in self.cards])
 
     def winner(
-        self, is_low: bool = False, purified: bool = False
+        self, is_low: bool = False, purified: bool = False, display: bool = True
     ) -> Optional[TrickPlay]:
         length: int = len(self)
         if length == 0:
-            p(f"No one won.")
+            if display:
+                p(f"No one won.")
             return None
         if length == 1:
-            p(f"One winning card.")
+            if display:
+                p(f"One winning card.")
             return self[0]
         if not purified:
             self.sort(key=key_heart_trick_sort, reverse=is_low)
-            return self.follow_suit().winner(is_low=is_low, purified=True)
+            return self.follow_suit().winner(
+                is_low=is_low, purified=True, display=display
+            )
         # check for duplicate winners
         if self[-2].card == self[-1].card:
-            p(f"No clear winner, trying again. {self.cards}")
+            if display:
+                p(f"No clear winner, trying again. {self.cards}")
             return HeartTrick([x for x in self if x.card != self[-1].card]).winner(
-                purified=True
+                purified=True, display=display
             )
         return self[-1]
+
+    def winning_card(self, is_low: bool = False) -> CardType:
+        return self.winner(display=False).card
 
     def follow_suit(
         self, strict: bool = True, ot: "Optional[Type[Trick]]" = None
@@ -429,7 +524,6 @@ class Hearts(BaseGame):
                 p(f"Holding cards")
         else:
             p(f"Pass cards {', '.join([pass_n(pd) for pd in pass_dir])}")
-        # TODO make passing cards work with humans
 
         # deal
         self.deal()
