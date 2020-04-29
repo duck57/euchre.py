@@ -167,11 +167,30 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
             **kwargs,
         )
 
+    def trt(self, hand: Optional[int] = None) -> int:
+        """
+        :param hand: for which hand?  None = whole game
+        :return: number of tricks taken
+        """
+        if hand is None:
+            return (
+                len([c for t in self.trick_history for c in t])
+                // self.in_game.handedness
+            )
+        return len(self.trick_history[hand]) // self.in_game.handedness
+
     def hand_tab(self, hand: Optional[int], tab: str = "\t") -> str:
+        """
+        For prettier end-of-game bookkeeping
+        :param hand: summary of which hand?  None = entire game
+        :param tab: separator value
+        :return: A summary of the hand
+        """
         return tab.join(
-            [str(len(self.trick_history[hand])), str(self.score_changes[hand])]
-            if hand is not None
-            else [str(sum([len(x) for x in self.trick_history])), str(self.score)]
+            [
+                str(self.trt(hand)),
+                str(self.score_changes[hand] if hand else self.score),
+            ]
         )
 
     @property
@@ -185,14 +204,17 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
         valid_passes: List[Callable] = None,
         *,
         current_stack: List[Callable] = None,
+        one_direction: bool = False,
+        **kwargs,
     ) -> List[Callable]:
         if pass_size < 1:
             return current_stack
         if not valid_passes:
-            valid_passes = pass_order_all
+            valid_passes = pass_order_ms_hearts_exe
         if current_stack:
-            if current_stack[-1] in [pass_hold, pass_kitty]:
+            if current_stack[-1] in [pass_hold, pass_kitty] or one_direction:
                 valid_passes = [current_stack[-1]]  # hold ends card selection
+                one_direction = True  # autofill the rest of the slots
             else:  # kitty can only be called on the first card
                 valid_passes = [v for v in valid_passes if v != pass_kitty]
         else:
@@ -200,12 +222,17 @@ class HeartPlayer(BasePlayer, WithScore, abc.ABC):
         return self.call_pass(
             pass_size - 1,
             valid_passes,
-            current_stack=current_stack + [self.pick_pass(valid_passes)],
+            current_stack=current_stack
+            + [
+                self.pick_pass(
+                    valid_passes, remaining=pass_size, one_direction=one_direction
+                )
+            ],
         )
 
     @staticmethod
     @abc.abstractmethod
-    def pick_pass(vp_list: List[Callable]) -> Callable:
+    def pick_pass(vp_list: List[Callable], **kwargs) -> Callable:
         return random.choice(vp_list)
 
 
@@ -220,22 +247,34 @@ def key_score(pl: WithScore):
 
 
 class HumanPlayer(HeartPlayer, BaseHuman):
-    @staticmethod
-    def pick_pass(vp_list: List[Callable]) -> Callable:
+    def pick_pass(self, vp_list: List[Callable], **kwargs) -> Callable:
         if len(vp_list) == 1:  # don't bother users if they can't make a choice
             return vp_list[0]
-        return pass_choice_display_list(vp_list)[0]
+        dct: Dict[str, Callable] = pass_choice_display_list(vp_list)
+        count: Optional[int] = kwargs.get("remaining")
+        preamble: str = f"(Up to {count} more) " if not kwargs.get(
+            "one_direction"
+        ) and isinstance(count, int) else ""
+        return dct[
+            click.prompt(
+                type=click.Choice(dct.keys(), False),
+                show_choices=False,
+                default=pass_n(next(self.in_game.pass_order)),
+                text=f"{preamble}Where to pass",
+            ).lower()
+        ]
 
 
 class ComputerPlayer(HeartPlayer, BaseComputer):
     sort_key = key_points
 
     def pick_card(self, valid_cards: Hand, **kwargs):
+        # TODO make me smarter
         c: CardType = valid_cards[-1]
         return c
 
     @staticmethod
-    def pick_pass(vp_list: List[Callable]) -> Callable:
+    def pick_pass(vp_list: List[Callable], **kwargs) -> Callable:
         return random.choice(vp_list)
 
 
@@ -279,28 +318,68 @@ class Hearts(BaseGame):
     def __init__(
         self,
         *,
-        player_names: List[str],
-        player_types: List[Type[BasePlayer]],
-        team_size: int,
-        card_type: Type[Cardstock],
-        victory_threshold: int,
-        start_time: str,
+        preset: Optional[str] = "Normal",
+        deck_type: Optional[str] = "Normal",
+        points: Optional[int] = 100,
+        pass_size: Optional[int] = 3,
+        unify_passing: Optional[bool] = True,
+        custom_calls_enabled: Optional[bool] = False,
+        boost9: Optional[bool] = True,
+        custom_pass_order: Optional[List[Callable]] = None,
+        no_hold: Optional[bool] = False,
+        allow_kitty: Optional[bool] = False,
         **kwargs,
     ):
-        super().__init__(
-            player_names,
-            player_types,
-            team_size,
-            card_type,
-            make_standard_deck,
-            HeartTeam,
-            victory_threshold,
-            start=start_time,
+        """
+        A game of Hearts
+
+        :param preset: basic game setup
+        :param deck_type: scoring rules to use
+        :param points: end the game once a player has accumulated this many points
+        :param pass_size: (maximum) number of cards to pass at the start of a hand
+        :param unify_passing: require all cards to be passed the same direction each hand if True
+        :param custom_calls_enabled: the dealer calls pass if True
+        :param boost9: leading or following suit with a 9 causes an extra-large trick if true
+        :param custom_pass_order: overrides no_hold and allow_kitty if set
+        :param no_hold: skips the hold phase of passing if True; requires all cards to be passed with custom calling
+        :param allow_kitty: allow players to pass to the kitty if True
+        :param kwargs: extra stuff to pass along to BaseGame
+        """
+
+        # set up the scoring rules
+        preset: chr = preset[0].upper() if preset else "N"
+        deck_type: Type[HeartCard] = {
+            "N": HeartCard,
+            "D": DirtHeartCard,
+            "S": PointHeartCard,
+        }.get(
+            deck_type[0].upper() if deck_type else preset, HeartCard,
         )
-        self.deck = self.deck * (self.handedness // 6 + 1)
+        kwargs["points"] = (
+            points if points else {"N": 100, "D": 450, "S": 500}.get(preset, 100)
+        )
+        kwargs["pass_size"] = pass_size if pass_size is not None else 3
+        self.unified_passing: bool = (
+            unify_passing
+            if unify_passing is not None
+            else (True if deck_type == DirtHeartCard else False)
+        )
+        self.player_calling: bool = custom_calls_enabled if (
+            custom_calls_enabled is not None
+        ) else (True if deck_type == DirtHeartCard else False)
+        self.boost9: bool = boost9 if boost9 is not None else True
+
+        super().__init__(
+            human_player_type=HumanPlayer,
+            computer_player_type=ComputerPlayer,
+            **kwargs,
+            team_type=HeartTeam,
+            game_name="Hearts",
+            card_type=deck_type,
+        )
 
         # set up passing order
-        self.valid_calls: List[Callable] = kwargs.get("cpo")
+        self.valid_calls: List[Callable] = custom_pass_order
         # it's your responsibility to make your custom call order behave properly
         if not self.valid_calls:
             """
@@ -311,16 +390,18 @@ class Hearts(BaseGame):
             self.valid_calls = [pass_left, pass_right]
             if not self.handedness % 2:
                 self.valid_calls.append(pass_across)
-            if kwargs.get("allow_holding"):
+            if no_hold:
                 self.valid_calls.append(pass_hold)
-            if kwargs.get("pass_to_kitty_enabled"):
+            if allow_kitty or allow_kitty is None and deck_type == DirtHeartCard:
                 self.valid_calls.append(pass_kitty)
         self.pass_order = cycle(self.valid_calls)
-        self.player_calling: bool = kwargs.get("custom_calls_enabled", False)
 
-        self.pass_size = kwargs.get("pass_size", 3)
         # moonshots are instant victory under DNFH rules
-        self.moon_points: int = self.deck.pointable.points if card_type != DirtHeartCard else victory_threshold ** 2
+        self.moon_points: int = (
+            self.deck.pointable.points
+            if deck_type != DirtHeartCard
+            else self.victory_threshold ** 2
+        )
         self.sun_cards: int = len(self.deck)
 
     def team_scores(self, pf: Callable = print) -> List[TeamType]:
@@ -346,18 +427,11 @@ class Hearts(BaseGame):
         return 1, teams_by_score[0]
 
     def play_hand(self, dealer: HeartPlayer) -> HeartPlayer:
-        # deal
-        self.deal()
-        hn: int = len(dealer.score_changes) + 1
-        po: List[HeartPlayer] = get_play_order(dealer)
-        for pl in po:
-            pl.trick_history.append(Hand())
-        p(f"Hand {hn}, dealt by {dealer}")
-
-        # pass cards
+        # call pass before dealing the cards
         pass_dir: List[Callable] = dealer.call_pass(
             self.pass_size,
             self.valid_calls if self.player_calling else [next(self.pass_order)],
+            one_direction=self.unified_passing,
         )
         if len(pass_dir) == len([x for x in pass_dir if x == pass_dir[0]]):
             # all cards go to the same direction
@@ -367,6 +441,17 @@ class Hearts(BaseGame):
                 p(f"Holding cards")
         else:
             p(f"Pass cards {', '.join([pass_n(pd) for pd in pass_dir])}")
+        # TODO make passing cards work with humans
+
+        # deal
+        self.deal()
+        hn: int = len(dealer.score_changes) + 1
+        po: List[HeartPlayer] = get_play_order(dealer)
+        for pl in po:
+            pl.trick_history.append(Hand())
+        p(f"Hand {hn}, dealt by {dealer}")
+
+        # pass cards
         self.kitty = pass_cards(po, pass_dir, self.kitty)
 
         # 2 of clubs lead
@@ -447,7 +532,7 @@ class Hearts(BaseGame):
                 if c.suit == Suit.HEART and not bh:
                     p("Hearts has been broken!")
                     bh = True
-                if c.suit == t[0].card.suit and c.rank == Rank.NINE:
+                if c.suit == t[0].card.suit and c.rank == Rank.NINE and self.boost9:
                     p("Boosted 9!")
                     boost9 = True
                 l_suit: Suit = t.lead_suit
@@ -543,60 +628,14 @@ class Hearts(BaseGame):
 
 
 @click.command()
+@common_options
 @click.option(
-    "--handedness",
-    "-h",
-    type=click.IntRange(3, 10),
-    default=4,
-    help="Number of players in the game",
-)
-@click.option(
-    "--humans",
-    "-p",
-    multiple=True,
-    default=[],
-    type=click.IntRange(0, 10),
-    help="List index of a human player, repeatable",
-)
-@click.option(
-    "--all-bots",
-    type=click.BOOL,
-    is_flag=True,
-    help="All-bot action for testing and demos",
-)
-@click.option(
-    "--required-points",
-    "-v",
-    "points",
-    type=click.IntRange(4, None),
-    help="Victory threshold (v): positive integer",
-    default=4,  # make this over 5 or else it gets overridden
-)
-@click.option(
-    "--team-size",
-    "-t",
-    type=click.IntRange(1, 5),
-    default=1,
-    help="Number of players per team. 1 = normal hearts",
-)
-@click.option(
-    "--pass-size",
-    "-z",
-    type=click.IntRange(1, 5),
-    default=3,
-    help="(maximum) Number of cards to pass",
-)
-@click.option(
-    "--no-hold",
-    type=click.BOOL,
-    is_flag=True,
-    help="All cards must be passed every round if set",
+    "--no-hold", type=click.BOOL, help="All cards must be passed every round if True",
 )
 @click.option(
     "--cat-passable",
     "allow_kitty",
     type=click.BOOL,
-    is_flag=True,
     help="Allows cards to be passed to the kitty and shuffled if set",
 )
 @click.option(
@@ -612,8 +651,10 @@ class Hearts(BaseGame):
     "--call-passes",
     "custom_call_pass",
     type=click.BOOL,
-    is_flag=True,
     help="Players call their own pass rules for each hand",
+)
+@click.option(
+    "--unify-passing", "up", type=click.BOOL, help="Prohibit split pass calls",
 )
 @click.option(
     "--game",
@@ -622,97 +663,31 @@ class Hearts(BaseGame):
     type=click.Choice(
         ["Normal", "Dirty", "DNFH", "Spot", "N", "D", "S"], case_sensitive=False,
     ),
-    default="Normal",
     help="""
     Preset setups for Hearts variants, overridden by other options
-    
+
+    \b
     Normal = as close to vanilla MS Hearts as this gets
-    
     Dirty/DNFH = loads o' special rules
-    
     Spot = Spot hearts (you take one point for each heart on the hearts)
     """,
 )
-def main(
-    handedness: int,
-    humans: List[int],
-    all_bots: bool,
-    points: int,
-    team_size: int,
-    score_rules: str,
-    preset: str,
-    pass_size: int,
-    no_hold: bool,
-    allow_kitty: bool,
-    custom_call_pass: bool,
-) -> None:
-    # global constants
-    start_time: str = str(datetime.now()).split(".")[0]
+@click.option(
+    "--boost9",
+    type=click.BOOL,
+    default=True,
+    help="Leading or following suit with a 9 doubles the trick size if True",
+)
+def main(**kwargs):
     global o
     global debug
     global log_dir
-
-    deck_dict: Dict[str, Type[HeartCard]] = {
-        "N": HeartCard,
-        "D": DirtHeartCard,
-        "S": PointHeartCard,
-    }
-    if points == 4:  # using a preset without modification
-        points = {"n": 100, "d": 450, "s": 500,}[preset[0].lower()]
-        deck: Type[HeartCard] = deck_dict[preset[0].upper()]
-        if deck == DirtHeartCard:
-            allow_kitty = True
-            no_hold = False
-            custom_call_pass = True
-    else:
-        deck: Type[HeartCard] = deck_dict[score_rules[0].upper()]
-
-    player_handles: List[str] = {
-        3: ["Juan", "Sarah", "Turia"],
-        4: ["Nelson", "Eustace", "Samantha", "Wyclef"],
-    }.get(
-        handedness,
-        [
-            "Juan",
-            "Nelson",
-            "Sarah",
-            "Eustace",
-            "Ahmed",
-            "Samantha",
-            "Turia",
-            "Wyclef",
-            "Amanda",
-            "Miranda",
-        ],
-    )[
-        :handedness
-    ]
-    if not humans:  # assume one human player as default
-        humans = [random.randrange(handedness)]
-    if all_bots:
-        humans = []
-        o = open(os.path.join(log_dir, f"{start_time}.gameplay"), "w")
+    if kwargs.get("all_bots"):
+        st: str = str(datetime.now()).split(".")[0]
+        o = open(os.path.join(log_dir, f"{st}.gameplay"), "w")
+        kwargs["start_time"] = st
         debug = True
-    if len(humans) == 1 and humans[0] < handedness:
-        player_handles[humans[0]] = "You"
-    p_types: List[Type[HeartPlayer]] = [ComputerPlayer for _ in range(handedness)]
-    for n in humans:
-        if n < len(p_types):
-            p_types[n] = HumanPlayer
-    h = Hearts(
-        player_names=player_handles,
-        player_types=p_types,
-        team_size=team_size,
-        card_type=deck,
-        victory_threshold=points,
-        start_time=start_time,
-        pass_size=pass_size,
-        pass_to_kitty_enabled=allow_kitty,
-        allow_holding=not no_hold,
-        custom_calls_enabled=custom_call_pass,
-    )
-    h.play()
-    h.write_log(log_dir)
+    make_and_play_game(Hearts, log_dir, **kwargs)
 
 
 if __name__ == "__main__":

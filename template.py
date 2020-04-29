@@ -33,8 +33,27 @@ def px(msg) -> None:
         p(msg)
 
 
-def main():
+class SomeGame(BaseGame):
+    """
+    Implement all the abstract methods, gameplay, etc…
+    """
+
     pass
+
+
+@click.command()
+@common_options
+# other click options go here
+def main(**kwargs):
+    global o
+    global debug
+    global log_dir
+    if kwargs.get("all_bots"):
+        o = open(
+            os.path.join(log_dir, f"{str(datetime.now()).split('.')[0]}.gameplay"), "w"
+        )
+        debug = True
+    make_and_play_game(SomeGame, log_dir, **kwargs)
 
 
 if __name__ == "__main__":

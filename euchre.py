@@ -40,7 +40,6 @@ def px(msg) -> None:
 
 class EuchrePlayer(BasePlayer, abc.ABC):
     desired_trump: Bid
-    shoot_strength: int
 
     def __init__(self, g: "GameType", /, name: str, **kwargs):
         super().__init__(g, name)
@@ -53,6 +52,10 @@ class EuchrePlayer(BasePlayer, abc.ABC):
             self.bid_estimates[t] = 0
 
     @property
+    def shoot_strength(self) -> int:
+        return self.in_game.shoot_strength
+
+    @property
     def choose_trump(self) -> Bid:
         return self.desired_trump
 
@@ -60,8 +63,6 @@ class EuchrePlayer(BasePlayer, abc.ABC):
     def make_bid(
         self,
         valid_bids: List[int],
-        d: Hand,
-        handedness: int,
         min_bid: int = 0,
         leading_player: "Optional[EuchrePlayer]" = None,
     ) -> int:
@@ -73,12 +74,15 @@ class EuchrePlayer(BasePlayer, abc.ABC):
             self.hand.trumpify(trump_suit)
         self.sort_hand(is_lo)
 
-    def receive_shooter(self, handedness: int, bid: Bid) -> None:
-        for pl in self.teammates:
-            self.receive_cards(pl.send_shooter(self.shoot_strength))
-            if not pl.is_bot:
-                print()
-        self.sort_hand(bid.is_low)
+    def receive_shooter(self, **kwargs) -> None:
+        shot = PassList(
+            list(self.teammates),
+            directions=[pass_shoot] * self.in_game.shoot_strength,
+            specific_destination=cycle([self]),
+            sort_low=self.in_game.low_win,
+        )
+        shot.collect_cards()
+        shot.distribute_cards()
 
 
 class HumanPlayer(BaseHuman, EuchrePlayer):
@@ -99,8 +103,6 @@ class HumanPlayer(BaseHuman, EuchrePlayer):
     def make_bid(
         self,
         valid_bids: List[int],
-        d: Hand,
-        handedness: int,
         min_bid: int = 0,
         leading_player: "Optional[EuchrePlayer]" = None,
     ) -> int:
@@ -126,18 +128,16 @@ class ComputerPlayer(BaseComputer, EuchrePlayer):
     def make_bid(
         self,
         valid_bids: List[int],
-        d: Hand,
-        handedness: int,
         min_bid: int = 0,
         leading_player: "Optional[EuchrePlayer]" = None,
     ) -> int:
         if max(self.bid_estimates.values()) == 0:
-            # simulate a hand
-            for card in self.hand:
-                d.remove(card)
             self.bid_estimates = {
                 t: self.simulate_hand(
-                    h_p=deepcopy(self.hand), d_p=deepcopy(d), handedness=handedness, t=t
+                    h_p=deepcopy(self.hand),
+                    d_p=deepcopy(self.card_count),
+                    handedness=self.in_game.handedness,
+                    t=t,
                 )
                 for t in Bid
             }
@@ -156,19 +156,16 @@ class ComputerPlayer(BaseComputer, EuchrePlayer):
         elif bid == len(self.hand):
             return valid_bids[-1]  # call a loner
         # don't bid outrageously if you don't have to
-        if bid in range(min_bid, min_bid + self.shoot_strength + 2):
-            return bid
         # count on two tricks from your partner
         return bid + self.shoot_strength * len(self.teammates)
 
     def pick_card(self, valid_cards: Hand, **kwargs,) -> Card:
         tp: Trick = kwargs.get("trick_in_progress")
         is_low: bool = kwargs.get("is_low")
-        handedness: int = kwargs.get("handedness")
-        discard: Hand = kwargs.get("discard")
-        unplayed: Hand = kwargs.get("unplayed", Hand())
-        broken: Dict[Suit, Union[Team, None, bool]] = kwargs.get("broken_suits")
-        trump: Optional[Suit] = kwargs.get("trump")
+        unplayed: Hand = self.card_count
+        broken: Dict[Suit, Union[Team, None, bool]] = self.in_game.suit_safety
+
+        # TODO be less stupid with large games (>4 players)
 
         def winning_leads(ss: List[Suit], st: bool = True) -> List[Card]:
             wl: List[Card] = []
@@ -305,46 +302,66 @@ class Team(BaseTeam, MakesBid, WithScore):
 
 
 class BidEuchre(BaseGame):
-    def __init__(
-        self,
-        *,
-        player_names: List[str],
-        player_types: List[Type[BasePlayer]],
-        team_size: int,
-        victory_threshold: int,
-        start_time: str,
-    ):
+    def __init__(self, *, minimum_bid: int = 6, **kwargs):
+        """
+        A game of bid euchre
+
+        :param minimum_bid: minimum bid that will get stuck to the dealer
+        :param kwargs: things to pass along to BaseGame
+        """
+
+        # setup for the super() call
+        if not kwargs.get("deck_replication"):
+            kwargs["deck_replication"] = 2
+        if not kwargs.get("team_size"):
+            kwargs["team_size"] = (
+                2 if (h := kwargs.get("handedness")) and not (h % 2) else 1
+            )
+        if kwargs.get("pass_size") is None:
+            kwargs["pass_size"] = 2
+        if kwargs.get("minimum_kitty_size") is None:
+            kwargs["minimum_kitty_size"] = 0
+        if not kwargs.get("minimum_hand_size"):
+            kwargs["minimum_hand_size"] = 8
         super().__init__(
-            player_names,
-            player_types,
-            team_size,
-            Card,
-            make_pinochle_deck,
-            Team,
-            victory_threshold,
-            start=start_time,
+            human_player_type=HumanPlayer,
+            computer_player_type=ComputerPlayer,
+            team_type=Team,
+            game_name="Euchre",
+            deck_generator=make_euchre_deck,
+            **kwargs,
         )
         self.trump: Optional[Suit] = None
         self.low_win: bool = False
-        self.hand_size: int = len(self.deck) // self.handedness
-        for pl in self.players:
-            pl.shoot_strength = {3: 3, 4: 2, 6: 1, 8: 1}[self.handedness]
 
+        # set the bidding
         c = configparser.ConfigParser()
         c.read("constants.cfg")
+        minimum_bid: int = minimum_bid if minimum_bid else (
+            6 if self.handedness == 3 else (self.hand_size // 2)
+        )
         self.valid_bids: List[int] = [
-            int(i) for i in c["ValidBids"][str(self.handedness)].split(",")
-        ]
+            i for i in range(minimum_bid, self.hand_size + 1)
+        ] + (
+            [round(self.hand_size * 1.5), self.hand_size * 2]
+            if len(self.teams) != len(self.players)
+            else []
+        )
+
         if (
-            victory_threshold is not None and victory_threshold > 0
+            self.victory_threshold is not None and self.victory_threshold > 0
         ):  # negative thresholds get dunked on
-            self.victory_threshold: int = victory_threshold
-            self.mercy_rule: int = -victory_threshold
-            self.bad_ai_end: int = -victory_threshold // 2
+            self.mercy_rule: int = -self.victory_threshold
+            self.bad_ai_end: int = -self.victory_threshold // 2
         else:
             self.victory_threshold: int = c["Scores"].getint("victory")
             self.mercy_rule: int = c["Scores"].getint("mercy")
             self.bad_ai_end: int = c["Scores"].getint("broken_ai")
+
+    @property
+    def shoot_strength(self) -> int:
+        """Alias so I don't break existing code"""
+        return self.pass_size
 
     def bidding(self, bid_order: List[EuchrePlayer]) -> EuchrePlayer:
         first_round: bool = True
@@ -363,7 +380,7 @@ class BidEuchre(BaseGame):
                     wb = min_bid
                     p(f"Dealer {pl} got stuck with {min_bid}")
                     if pl.is_bot:  # dealer picks suit
-                        pl.make_bid(self.valid_bids, make_pinochle_deck(), hands)
+                        pl.make_bid(self.valid_bids, min_bid, pl)
                     wp = pl
                 else:  # someone won the bid
                     wb = min_bid - 1
@@ -375,9 +392,7 @@ class BidEuchre(BaseGame):
                 break
 
             # get the bid
-            bid: int = pl.make_bid(
-                self.valid_bids, deepcopy(self.deck), hands, min_bid, wp
-            )
+            bid: int = pl.make_bid(self.valid_bids, min_bid, wp)
 
             # player passes
             if bid < min_bid:
@@ -414,6 +429,7 @@ class BidEuchre(BaseGame):
         # declare Trump
         trump: Bid = lead.choose_trump
         p(trump)
+        self.low_win = trump.is_low
         p(f"{lead} bid {lead.team.bid} {trump.name}\n")
 
         # modify hands if trump called
@@ -425,7 +441,7 @@ class BidEuchre(BaseGame):
         lone: Optional[EuchrePlayer] = None
         if lead.team.bid > self.hand_size:
             if lead.team.bid < 2 * self.hand_size:
-                lead.receive_shooter(self.handedness, trump)
+                lead.receive_shooter()
             lone = lead
 
         # play the tricks
@@ -563,106 +579,23 @@ def score_key(t: Team) -> int:
     return t.score
 
 
-# normal euchre would be an entirely different function because of the kitty
 @click.command()
+@common_options
 @click.option(
-    "--handedness",
-    "-h",
-    type=click.Choice(
-        [
-            "33",
-            "42",
-            "63",
-            "62",
-            # Turn off 8-handed for now
-            # "82",
-            # "84",
-        ],
-        False,
-    ),
-    default="42",
-    help="""
-    Two digits: number of players followed by number of teams.
-    
-    63 = six players divided into three teams of 2 players each
-    """,
+    "--minimum-bid",
+    type=click.IntRange(0, None),
+    help="The minimum bid (will usually be 6 if not set)",
 )
-@click.option(
-    "--humans",
-    "-p",
-    multiple=True,
-    default=[],
-    type=click.IntRange(0, 8),
-    help="List index of a human player, repeatable",
-)
-@click.option(
-    "--all-bots",
-    type=click.BOOL,
-    is_flag=True,
-    help="All-bot action for testing and demos",
-)
-@click.option(
-    "--required-points",
-    "-v",
-    "points",
-    type=click.IntRange(4, None),
-    help="""
-    Victory threshold (v): positive integer
-    
-    team.score > v: victory
-    
-    team.score < -v: mercy rule loss
-    
-    all team scores < -v/2: everyone loses 
-    """,
-)
-def main(
-    handedness: int, humans: List[int], all_bots: bool, points: Optional[int]
-) -> None:
-    handedness: int = int(handedness)
-    hands: int = handedness // 10
-    teams: int = handedness % 10
-    ppt: int = hands // teams
-    start_time: str = str(datetime.now()).split(".")[0]
+def main(**kwargs):
     global o
     global debug
     global log_dir
-    if not humans:  # assume one human player as default
-        humans = [random.randrange(hands)]
-    if all_bots:
-        humans = []
-        o = open(os.path.join(log_dir, f"{start_time}.gameplay"), "w")
+    if kwargs.get("all_bots"):
+        st: str = str(datetime.now()).split(".")[0]
+        o = open(os.path.join(log_dir, f"{st}.gameplay"), "w")
+        kwargs["start_time"] = st
         debug = True
-    player_handles: List[str] = {
-        3: ["Alice", "Bob", "Charlie"],
-        4: ["North", "East", "South", "West"],
-        6: ["Richard", "Abbott", "Gallagher", "Mortimer", "Costello", "Millhouse"],
-        8: [
-            "Nelson",
-            "Mortimer",
-            "Eustace",
-            "Costello",
-            "Samantha",
-            "Richard",
-            "Wyclef",
-            "Abbott",
-        ],
-    }[hands]
-    if len(humans) == 1 and humans[0] < hands:
-        player_handles[humans[0]] = "Human"
-    p_types: List[Type[EuchrePlayer]] = [ComputerPlayer for _ in range(handedness)]
-    for n in humans:
-        if n < len(p_types):
-            p_types[n] = HumanPlayer
-    g = BidEuchre(
-        player_names=player_handles,
-        player_types=p_types,
-        team_size=ppt,
-        victory_threshold=points,
-        start_time=start_time,
-    )
-    g.play()
-    g.write_log(log_dir)
+    make_and_play_game(BidEuchre, log_dir, **kwargs)
 
 
 if __name__ == "__main__":

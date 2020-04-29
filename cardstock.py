@@ -11,6 +11,7 @@ import itertools
 from enum import Enum, unique
 from itertools import cycle
 import random
+from math import ceil
 from pathlib import Path
 from typing import (
     List,
@@ -26,6 +27,8 @@ from typing import (
     Generic,
     TypeVar,
     Type,
+    Iterator,
+    Any,
 )
 from copy import deepcopy
 from datetime import datetime
@@ -54,6 +57,10 @@ def p0(*msg):
     pass
 
 
+def now() -> str:
+    return str(datetime.now()).split(".")[0]
+
+
 def make_players(
     handles: List[str],
     player_type: "Union[Iterable[Type[PlayerType]], Type[PlayerType]]",
@@ -69,7 +76,11 @@ class Color:
     WHITE = (0, "FFF")
     BLACK = (1, "000")
     RED = (2, "F00")
-    YES = (99, "")
+    YES = (99, "00F")
+    BLUE = (-5, "00F")
+    INTERNATIONAL_KLEIN_BLUE = (153, "002FA7")
+    GREEN = (3, "0F0")
+    YELLOW = (5, "FF0")
 
     def __init__(self, value: int, hexa: str):
         self.v = value
@@ -78,15 +89,22 @@ class Color:
     def __hash__(self) -> int:
         return self.v
 
+    @property
+    def hex_code(self) -> str:
+        return f"#{self.hex}"
+
 
 @unique
 class Suit(Enum):
-    JOKER = (0, "🃏", "JOKER", Color.WHITE)
+    JOKER_WHITE = (0, "🃏", "JOKER_WHITE", Color.WHITE)
+    JOKER = (0, "🃏", "JOKER", Color.YES)
     CLUB = (1, "♣", "SPADE", Color.BLACK)
     DIAMOND = (2, "♢", "HEART", Color.RED)
     SPADE = (3, "♠", "CLUB", Color.BLACK)
     HEART = (4, "♡", "DIAMOND", Color.RED)
     TRUMP = (5, "T", "TRUMP", Color.YES)
+    JOKER_RED = (0, "🃏", "JOKER_BLACK", Color.RED)
+    JOKER_BLACK = (0, "🃏", "JOKER_RED", Color.BLACK)
 
     opposite: "Suit"
     v: int
@@ -340,9 +358,7 @@ class Hand(List[CardType]):
 
     def __mul__(self, other) -> "Hand":
         assert isinstance(other, int)
-        for _ in range(other - 1):
-            self.extend(self)
-        return self
+        return Hand([c for c in self for _ in range(other)])
 
     @property
     def points(self) -> int:
@@ -363,27 +379,60 @@ class Hand(List[CardType]):
     def pcv(self) -> int:
         return self.pointable.points
 
+    def add_jokers(self, j: int = 0, c: Type[Cardstock] = Card) -> "Hand":
+        if j < 1:
+            return self
+        if j % 2:
+            self.append(c(Rank.JOKER, random.choice([Suit.JOKER, Suit.JOKER_WHITE])))
+        for _ in range(j // 2):
+            self.append(c(Rank.JOKER, Suit.JOKER_RED))
+            self.append(c(Rank.JOKER, Suit.JOKER_BLACK))
+        return self
 
-def make_deck(r: List[Rank], s: List[Suit], c: Type[Cardstock] = Card) -> Hand:
-    return Hand(c(rank, suit) for rank in r for suit in s)
+
+def make_deck(
+    r: List[Rank], s: List[Suit], c: Type[Cardstock] = Card, jokers: int = 0
+) -> Tuple[Hand, int]:
+    return (
+        Hand(c(rank, suit) for rank in r for suit in s).add_jokers(jokers, c),
+        len(r) * len(s) + jokers,
+    )
 
 
-def make_euchre_deck(c: Type[Cardstock] = Card) -> Hand:
+def make_euchre_deck(c: Type[Cardstock] = Card, jokers: int = 0) -> Tuple[Hand, int]:
     """Single euchre deck"""
-    return make_deck(euchre_ranks, suits, c)
+    return make_deck(euchre_ranks, suits, c, jokers)
 
 
-def make_pinochle_deck(c: Type[Cardstock] = Card) -> Hand:
+def make_pinochle_deck(c: Type[Cardstock] = Card, jokers: int = 0) -> Tuple[Hand, int]:
     """a.k.a. a double euchre deck"""
-    return make_euchre_deck(c) * 2
+    return (make_euchre_deck(c) * 2)[0].add_jokers(jokers, c), 48 + jokers
 
 
-def make_standard_deck(c: Type[Cardstock] = Card) -> Hand:
+def make_standard_deck(c: Type[Cardstock] = Card, jokers: int = 0) -> Tuple[Hand, int]:
     """
     Standard 52 card deck
     Perfect for 52 pick-up
     """
-    return make_deck(poker_ranks, suits, c)
+    return make_deck(poker_ranks, suits, c, jokers)
+
+
+def make_minimum_sized_deck(
+    m: Callable[[Type[Cardstock], int], Tuple[Hand, int]],
+    c: Type[Cardstock] = Card,
+    jokers: int = 0,
+    minimum_size: int = 0,
+    minimum_copies: int = 1,
+) -> Hand:
+    """
+    multiples the deck's size until it is greater or equal to the minimum number of cards
+    Jokers are added at the very end unless the value is negative
+    """
+    deck, size = m(c, 0 if jokers > 0 else -jokers)
+    if minimum_size < 1:
+        return deck
+    multiplicity: int = max(ceil((minimum_size - jokers) / size), minimum_copies)
+    return (deck * multiplicity).add_jokers(jokers)
 
 
 def follow_suit(
@@ -477,6 +526,7 @@ class BasePlayer(abc.ABC):
         self.in_game: GameType = g  # allow access to the game in which you're playing
         self.tricks_taken: List[Hand] = []
         self.sort_key: Callable[[CardType], int] = key_display4human
+        self.passed_cards = Hand()
 
     @property
     def deck(self) -> Hand:
@@ -533,6 +583,14 @@ class BasePlayer(abc.ABC):
     def send_shooter(
         self, cards: int, p_word: str = "send", prompt="Send a card to your friend."
     ) -> List[Card]:
+        """
+        Passes cards
+        Name is from its original use in euchre
+        :param cards: number of cards to send
+        :param p_word: changes the word in the inline prompt for humans
+        :param prompt: replaces "choose the lead" at the top of the prompt for humans
+        :return: a list of cards to be sent
+        """
         if not cards or not self.hand:
             return []
         out: List[CardType] = (
@@ -545,6 +603,7 @@ class BasePlayer(abc.ABC):
         )
         for c in out:
             self.hand.remove(c)
+            self.passed_cards.append(c)
         return out
 
     def sort_hand(self, is_low: bool = False) -> None:
@@ -554,24 +613,11 @@ class BasePlayer(abc.ABC):
         """
         self.hand.sort(key=self.sort_key, reverse=is_low if self.is_bot else False)
 
-    def receive_cards(self, cards_in: Iterable[CardType]) -> None:
+    def receive_cards(
+        self, cards_in: Iterable[CardType], /, *, sort_low: bool = False, **kwargs
+    ) -> None:
         self.hand += cards_in
-        self.sort_hand()
-
-    def pass_left(self, c: Union[CardType, List[CardType]]) -> None:
-        self.next_player.receive_cards(list(c))
-
-    def pass_right(self, c: Union[CardType, List[CardType]]) -> None:
-        self.previous_player.receive_cards(list(c))
-
-    def pass_across(self, c: Union[CardType, List[CardType]]) -> None:
-        if self.opposite_player:
-            self.opposite_player.receive_cards(list(c))
-        else:
-            self.pass_hold(c)
-
-    def pass_hold(self, c: Union[CardType, List[CardType]]) -> None:
-        self.receive_cards(list(c))
+        self.sort_hand(sort_low)
 
 
 PlayerType = TypeVar("PlayerType", bound=BasePlayer)
@@ -608,7 +654,7 @@ class BaseHuman(BasePlayer, abc.ABC):
                 [f"{j:2}" if j in proper_picks else "  " for j in range(len(self.hand))]
             )
         )
-        return self.hand.pop(
+        return self.hand[
             int(
                 click.prompt(
                     f"Index of card to {kwargs.get('p_word', 'play')}",
@@ -617,7 +663,7 @@ class BaseHuman(BasePlayer, abc.ABC):
                     default=proper_picks[0] if len(proper_picks) == 1 else None,
                 )
             )
-        )
+        ]
 
 
 class BaseTeam:
@@ -639,9 +685,11 @@ def deal(
     minimum_kitty_size: int = 0,
     shuffled: bool = True,
     replace: bool = True,
+    fixed_hand_size: Optional[int] = None,
 ) -> Hand:
     """
     Enforces an equal-size deal
+    :param fixed_hand_size: deal this many cards instead of dealing until you run out
     :param players: list of players to whom to deal
     :param deck: the deck from which the cards are dealt
     :param shuffled: is the deck shuffled first?
@@ -659,7 +707,7 @@ def deal(
     k_dex: Optional[int] = deck_size if k_size == 0 else -k_size
     kitty: Hand = Hand(deck[k_dex:])
     for i in range(handedness):
-        h: Hand = deepcopy(Hand(deck[i:k_dex:handedness]))
+        h: Hand = deepcopy(Hand(deck[i:k_dex:handedness][:fixed_hand_size]))
         if replace:
             players[i].hand = h
         else:
@@ -667,32 +715,252 @@ def deal(
     return kitty
 
 
+_global_options = [
+    click.option(
+        "--humans",
+        "-p",
+        multiple=True,
+        default=[],
+        type=click.IntRange(0, 8),
+        help="List index of a human player, repeatable",
+    ),
+    click.option(
+        "--all-bots",
+        type=click.BOOL,
+        is_flag=True,
+        help="All-bot action for testing and demos",
+    ),
+    click.option(
+        "--required-points",
+        "-v",
+        "points",
+        type=click.IntRange(1, None),
+        help="""
+        Victory threshold (v): positive integer
+
+        \b
+        team.score > v: victory
+        team.score < -v: mercy rule loss
+        all team scores < -v/2: everyone loses 
+        """,
+    ),
+    click.option(
+        "--handedness",
+        "-h",
+        type=click.IntRange(3, 10),
+        default=4,
+        help="Number of players in the game",
+    ),
+    click.option(
+        "--team-size",
+        "-t",
+        type=click.IntRange(1, 5),
+        help="""
+        Number of players per team. 
+        
+        \b
+        1 = normal hearts
+        2 = standard 4-player euchre
+        """,
+    ),
+    click.option(
+        "--pass-size",
+        "-z",
+        type=click.IntRange(1, 5),
+        help="(maximum) Number of cards to pass",
+    ),
+    click.option(
+        "--minimum-hand-size",
+        type=click.IntRange(1, None),
+        help="Minimum size of the hand",
+    ),
+    click.option(
+        "--add-jokers",
+        type=click.IntRange(0, None),
+        help="number of jokers to add to the deck",
+    ),
+    click.option(
+        "--minimum-kitty-size",
+        type=click.IntRange(0, None),
+        help="minimum number of cards in the kitty",
+    ),
+    click.option(
+        "--deck-replication",
+        type=click.IntRange(1, None),
+        help="Minimum number of times the deck gets replicated",
+    ),
+]
+
+
+def common_options(func):
+    return add_options(func, *_global_options)
+
+
+def add_options(func, *options):
+    for o in options:
+        func = o(func)
+    return func
+
+
+def make_and_play_game(
+    game: "Type[BaseGame]", logging_directory: Optional[str], **kwargs
+):
+    start_time = kwargs.get("start_time", str(datetime.now()).split(".")[0])
+    g = game(start=start_time, **kwargs)
+    g.play()
+    g.write_log(logging_directory)
+
+
 class BaseGame(abc.ABC):
     def __init__(
         self,
-        player_names: List[str],
-        player_types: List[Type[BasePlayer]],
-        team_size: int,
-        card_type: Type[Cardstock],
-        deck_generator: Callable[[Type[Cardstock]], Hand],
+        *,
+        deck_generator: Callable[
+            [Type[Cardstock], int], Tuple[Hand, int]
+        ] = make_standard_deck,
+        human_player_type: Type[BaseHuman],
+        computer_player_type: Type[BaseComputer],
+        card_type: Type[Cardstock] = Card,
         team_type: Type[BaseTeam],
-        victory_threshold: int,
+        game_name: str,
+        force_multiple_teams: bool = True,
+        handedness: int = 4,
+        team_size: int = 1,
+        points: int,
+        start: str = now(),
+        pass_size: int = None,
+        add_jokers: int = None,
+        minimum_kitty_size: int = 0,
+        minimum_hand_size: int = 10,
+        deck_replication: int = 1,
+        all_bots: bool = False,
+        humans: List[int] = None,
+        shuffle_deck: bool = True,
         **kwargs,
     ):
+        """
+        The basic setup for a trick-taking card game.
+        Most of these params should either be from the Click kwargs or
+        left at their default values rather than parsing them in the
+        constructor of child classes.
+
+        :param deck_generator: function that generates the deck of cards
+        :param human_player_type: Class of human players
+        :param computer_player_type: Class for computer players
+        :param card_type: Class of card to use
+        :param team_type: Class of team
+        :param game_name: string of the game's name, should be the same as the filename
+        :param force_multiple_teams: make sure all the players aren't on the same team
+        :param handedness: number of players in the game
+        :param team_size: number of players on each team
+        :param points: victory threshold
+        :param start: string of game start time, used for logging
+        :param pass_size: number of cards to pass in passing games
+        :param add_jokers: number of jokers to add to the deck
+        :param minimum_kitty_size: minimum number of leftover cards on each deal
+        :param minimum_hand_size: minimum hand size, determines deck replication
+        :param deck_replication: at least this many copies of the deck are created
+        :param all_bots: set True for all-bot testing action
+        :param humans: index locations of human players
+        :param shuffle_deck: shuffle before dealing?
+        :param kwargs: additional arguments to alter the game's setup and behavior
+        """
+
+        """
+        Basic setup and checks
+        """
+        self.handedness: int = 4 if handedness is None else handedness
+        # sanity checking
+        if not team_size:
+            team_size = 1
+        assert (
+            self.handedness % team_size == 0
+        ), f"{self.handedness} players can't divide into teams of {team_size}"
+        if force_multiple_teams:
+            assert (  # also handles negative team sizes
+                self.handedness // team_size > 1
+            ), f"There's no game if everyone is on the same team"
+
         # constants
-        self.victory_threshold = victory_threshold
-        self.start_time: str = kwargs.get("start", str(datetime.now()).split(".")[0])
-        # make the deck
-        self.kitty: Hand[CardType] = Hand()
-        self.deck: Hand[CardType] = deck_generator(card_type)
+        self.victory_threshold: int = points
+        self.start_time: str = start if start else now()
+        c = configparser.ConfigParser()
+        c.read("constants.cfg")
+
+        def g_h() -> str:
+            return f"{game_name.capitalize()}-{self.handedness}"
+
+        if pass_size is None:
+            try:
+                pass_size = c.getint("Shoot Strength", g_h())
+            except configparser.NoOptionError:
+                try:
+                    pass_size = c.getint("Shoot Strength", game_name)
+                except configparser.NoOptionError:
+                    pass_size = c.getint("Shoot Strength", "Default")
+        self.pass_size: int = pass_size if pass_size else 0
+
+        """
+        Make the deck
+        """
+        # the initial constant configuration
+        self.kitty: Hand = Hand()
+        j = 0 if add_jokers is None else 0
+        self.minimum_kitty_size = (
+            0 if minimum_kitty_size is None else minimum_kitty_size
+        )
+
+        # actually make the deck
+        self.deck = make_minimum_sized_deck(
+            deck_generator,
+            card_type,
+            j,
+            self.handedness * (minimum_hand_size if minimum_hand_size else 1),
+            deck_replication if deck_replication else 1,
+        )
+
+        # calculate hand sizes and card counts
+        self.hand_size: int = fhs if (fhs := kwargs.get("fixed_hand_size")) else len(
+            self.deck
+        ) // self.handedness
+        self.fhs: Optional[int] = fhs
         self.suit_safety: Dict[Suit, Union[None, bool, TeamType, PlayerType]] = {}
         self.reset_suit_safety()
-        # create players and teams
-        self.players: List[PlayerType] = make_players(player_names, player_types, self)
-        self.handedness: int = len(self.players)
-        assert (
-            self.handedness % team_size == 0 and self.handedness // team_size > 1
-        ), f"{self.handedness} players can't divide into teams of {team_size}"
+
+        """
+        Setup players and teams
+        """
+        # Get names
+        try:  # preset name schema
+            player_names = c["Names"][g_h()].strip().split("\n")
+        except KeyError:  # names randomly from a list
+            pph = c["Names"]["Grand Name Gallery"].strip().split("\n")
+            est: str = f"{self.handedness} is way too many players!\n"
+            est += "Edit the grand name gallery in constants.cfg to have "
+            est += f"at least {self.handedness-len(pph)} more names"
+            assert self.handedness <= len(pph), est
+            player_names = pph[
+                (j := random.randrange(len(pph) - self.handedness)) : j
+                + self.handedness
+            ]
+
+        # calculate player types
+        if not humans:  # assume one human player as default
+            humans = [random.randrange(self.handedness)]
+        if all_bots:
+            humans = []
+        if len(humans) == 1 and humans[0] < self.handedness:
+            player_names[humans[0]] = kwargs.get("single_human_name", "You")
+        self.players: List[PlayerType] = make_players(
+            player_names,
+            [
+                (human_player_type if i in humans else computer_player_type)
+                for i in range(self.handedness)
+            ],
+            self,
+        )
+
+        # make teams
         self.teams: Set[TeamType] = {
             team_type(self.players[i :: self.handedness // team_size])
             for i in range(self.handedness // team_size)
@@ -708,11 +976,10 @@ class BaseGame(abc.ABC):
                 else None
             )
         # initial dealer for 4-hands should be South
-        self.current_dealer: PlayerType = self.players[2]
+        self.current_dealer: PlayerType = self.players[2 % self.handedness]
         self.played_cards = Hand()
-        self.unplayed_cards = Hand()
-        self.minimum_kitty_size: int = kwargs.get("kitty_minimum", 0)
-        self.shuffle_deck: bool = kwargs.get("shuffle_deck", True)
+        self.unplayed_cards = deepcopy(self.deck)
+        self.shuffle_deck: bool = shuffle_deck if shuffle_deck is not None else True
 
     def reset_suit_safety(self) -> None:
         self.suit_safety = {s: False for s in suits}
@@ -728,7 +995,14 @@ class BaseGame(abc.ABC):
             shuffled = self.shuffle_deck
 
         # actually deal
-        self.kitty = deal(self.players, self.deck, minimum_kitty_size, shuffled, True)
+        self.kitty = deal(
+            self.players,
+            self.deck,
+            minimum_kitty_size,
+            shuffled,
+            True,
+            self.hand_size if self.fhs else None,
+        )
 
         # stuff for card counting
         self.reset_suit_safety()
@@ -812,7 +1086,7 @@ class TestGame(BaseGame, abc.ABC):
         pass
 
     def deal(
-        self, minimum_kitty_size: int = 0, shuffled: bool = True
+        self, minimum_kitty_size: int = 0, shuffled: bool = False, **kwargs
     ) -> Hand[CardType]:
         for i in range(self.handedness):
             self.players[i].hand = self.p_hands[i]
@@ -825,7 +1099,7 @@ GameType = TypeVar("GameType", bound=BaseGame)
 def is_prime(n: int):
     """
     Primality test
-    from https://stackoverflow.com/questions/15285534/isprime-function-for-python-language
+    from https://stackoverflow.com/questions/15285534/
     """
     if n == 2 or n == 3:
         return True
@@ -846,21 +1120,99 @@ def is_prime(n: int):
     return True
 
 
+class PassPacket:
+    """
+    This is a one-to-one player to card ratio
+    """
+
+    def __init__(
+        self,
+        from_player: BasePlayer,
+        direction: Callable,
+        *,
+        c: Optional[CardType] = None,
+        to_player: Optional[PlayerType] = None,
+        **kwargs,
+    ):
+        self.from_player = from_player
+        if direction == pass_shoot:
+            assert to_player is not None
+        self.direction = direction
+        self.card: CardType = c if c else type(from_player.hand[0])(
+            Rank.JOKER, Suit.JOKER
+        )
+        self.specified_player = to_player
+        self.low_sort = kwargs.get("sort_low", False)
+
+    def __repr__(self):
+        return f"PassPacket {self.card} from {self.from_player} to {self.to_player}"
+
+    @property
+    def to_player(self) -> PlayerType:
+        return (
+            self.specified_player
+            if self.specified_player
+            else {
+                pass_left: self.from_player.next_player,
+                pass_right: self.from_player.previous_player,
+                pass_across: self.from_player.opposite_player
+                if self.from_player.opposite_player
+                else self.from_player,
+                pass_hold: self.from_player,
+            }[self.direction]
+        )
+
+    def collect_card(self) -> CardType:
+        self.card = self.from_player.send_shooter(
+            1, self.direction.__name__.replace("_", " ")
+        )[0]
+        return self.card
+
+    def send_card(self) -> None:
+        self.to_player.receive_cards([self.card], sort_low=self.low_sort)
+
+
+class PassList(List[PassPacket]):
+    def __init__(
+        self,
+        playlist: List[PlayerType],
+        directions: List[Callable],
+        specific_destination: Optional[Iterable[PlayerType]] = None,
+        **kwargs,
+    ):
+        if specific_destination and not isinstance(specific_destination, Iterator):
+            specific_destination = cycle(specific_destination)
+        super().__init__(
+            [
+                PassPacket(
+                    p,
+                    d,
+                    to_player=next(specific_destination)
+                    if specific_destination
+                    else None,
+                    **kwargs,
+                )
+                for p, d in itertools.product(playlist, directions)
+                if d != pass_hold
+            ]
+        )
+
+    def collect_cards(self) -> None:
+        [p.collect_card() for p in self]
+
+    def distribute_cards(self) -> None:
+        [p.send_card() for p in self]
+
+
 def pass_cards(
     playlist: List[PlayerType], directions: List[Callable], kitty: Hand,
 ) -> Hand:
     if pass_kitty in directions:
         return pass_kitty(playlist, kitty, len(directions))
-    where_to: List[Tuple[PlayerType, Callable]] = [
-        x for x in itertools.product(playlist, directions) if x[1] != pass_hold
-    ]
-    # collect cards
-    cards: List[CardType] = [
-        p.send_shooter(1, a.__name__.replace("_", " ")) for p, a in where_to
-    ]
-    # pass the cards
-    for i in range(len(cards)):
-        getattr(where_to[i][0], where_to[i][1].__name__)(cards[i])
+    where_to = PassList(playlist, directions)
+    where_to.collect_cards()
+    # this is a separate step so that players may not re-pass a card
+    where_to.distribute_cards()
     # should be a clean pass-through, added for simpler function signature
     return kitty
 
@@ -877,10 +1229,25 @@ def pass_kitty(
     return kitty
 
 
-pass_left = BasePlayer.pass_left
-pass_right = BasePlayer.pass_right
-pass_across = BasePlayer.pass_across
-pass_hold = BasePlayer.pass_hold
+def pass_left():
+    return "left"
+
+
+def pass_right():
+    return "right"
+
+
+def pass_across():
+    return "across"
+
+
+def pass_hold():
+    return "hold"
+
+
+def pass_shoot():
+    return "shoot"
+
 
 pass_order_all = [
     pass_left,
@@ -901,6 +1268,8 @@ def pass_n(p: Callable, /) -> str:
 def pass2s(p: Callable, /) -> str:
     if p == pass_hold:
         return "to yourself"
+    if p == pass_shoot:
+        return "to your partner"
     return ("" if p == pass_across else "to the ") + pass_n(p)
 
 
